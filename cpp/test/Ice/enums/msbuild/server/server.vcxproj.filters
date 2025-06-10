@@ -1,0 +1,93 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\..\Server.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\TestI.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="x64\Debug\Test.cpp">
+      <Filter>Source Files\x64\Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="Win32\Debug\Test.cpp">
+      <Filter>Source Files\Win32\Debug</Filter>
+    </ClCompile>
+    <ClCompile Include="x64\Release\Test.cpp">
+      <Filter>Source Files\x64\Release</Filter>
+    </ClCompile>
+    <ClCompile Include="Win32\Release\Test.cpp">
+      <Filter>Source Files\Win32\Release</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{1301fcc5-32b7-48c6-b1eb-55b58057089a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Slice Files">
+      <UniqueIdentifier>{8ea57c26-a4c5-41f6-9c3f-d3c72ada2348}</UniqueIdentifier>
+      <Extensions>ice</Extensions>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{7f5f0ef0-5a2b-42c7-8abd-5e2b96909a80}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\x64">
+      <UniqueIdentifier>{a1b4bba4-668a-4f2b-8b97-4f2539344fe4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\x64">
+      <UniqueIdentifier>{67932bbd-6e77-4bc9-a244-3f7419de6c1b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Win32">
+      <UniqueIdentifier>{a5346066-d152-4744-b774-f322e6de8459}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Win32">
+      <UniqueIdentifier>{bceb0de4-9588-43ff-96b1-55865fdf7878}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\x64\Debug">
+      <UniqueIdentifier>{ba66a383-efa8-44e7-814d-3763c6c01961}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\x64\Debug">
+      <UniqueIdentifier>{e2906c7f-8d0a-4329-88c4-9cacabb223b4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Win32\Debug">
+      <UniqueIdentifier>{9906aa0a-4fb7-44a4-97fc-477e25365f3d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Win32\Debug">
+      <UniqueIdentifier>{99a45886-3a1d-4fdc-8efe-5dfd1c533489}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\x64\Release">
+      <UniqueIdentifier>{7d729409-c717-4300-b810-cdd755db7d9d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\x64\Release">
+      <UniqueIdentifier>{216616a3-2b62-458c-9e77-2f8b561b6455}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Win32\Release">
+      <UniqueIdentifier>{f1d633c5-ee22-42eb-aad8-db9b84fcd371}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Win32\Release">
+      <UniqueIdentifier>{588ff47d-d280-4048-8bf6-90f6d3766b7e}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\TestI.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="x64\Debug\Test.h">
+      <Filter>Header Files\x64\Debug</Filter>
+    </ClInclude>
+    <ClInclude Include="Win32\Debug\Test.h">
+      <Filter>Header Files\Win32\Debug</Filter>
+    </ClInclude>
+    <ClInclude Include="x64\Release\Test.h">
+      <Filter>Header Files\x64\Release</Filter>
+    </ClInclude>
+    <ClInclude Include="Win32\Release\Test.h">
+      <Filter>Header Files\Win32\Release</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <SliceCompile Include="..\..\Test.ice">
+      <Filter>Slice Files</Filter>
+    </SliceCompile>
+  </ItemGroup>
+</Project>

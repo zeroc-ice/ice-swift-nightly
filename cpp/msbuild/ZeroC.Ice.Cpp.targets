@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (c) ZeroC, Inc. -->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+    <PropertyGroup>
+        <IceConfiguration Condition="'$(UseDebugLibraries)' == 'true'">Debug</IceConfiguration>
+        <IceConfiguration Condition="'$(UseDebugLibraries)' != 'true'">Release</IceConfiguration>
+
+        <!-- Set the debugger environment PATH to include the package bin directory for the selected configuration. -->
+        <LocalDebuggerEnvironment Condition="'$(LocalDebuggerEnvironment)' == ''">PATH=$(MSBuildThisFileDirectory)bin\$(Platform)\$(IceConfiguration)</LocalDebuggerEnvironment>
+    </PropertyGroup>
+
+    <!-- Import Slice Tools targets file -->
+    <Import Project="$(MSBuildThisFileDirectory)..\ZeroC.Ice.Slice.Tools.Cpp.targets" />
+
+    <ItemDefinitionGroup>
+        <ClCompile>
+            <!-- Add the package include directory to the compiler's include path. -->
+            <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+        </ClCompile>
+        <Link>
+            <!-- Add the package library directories for both Debug and Release configurations -->
+            <!-- to the linker library path. -->
+            <AdditionalLibraryDirectories>$(MSBuildThisFileDirectory)lib\$(Platform)\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+            <AdditionalLibraryDirectories>$(MSBuildThisFileDirectory)lib\$(Platform)\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+        </Link>
+    </ItemDefinitionGroup>
+
+</Project>

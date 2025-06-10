@@ -1,0 +1,56 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="..\..\Server.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{23121911-cd45-46ae-9885-bf096ee4b1b9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{044ec77f-a519-47b1-8ddd-96d29b6dc7dc}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Slice Files">
+      <UniqueIdentifier>{fbb09e8c-d13b-4fa8-b8e0-fdd7412ebe22}</UniqueIdentifier>
+      <Extensions>ice</Extensions>
+    </Filter>
+    <Filter Include="Source Files\x64">
+      <UniqueIdentifier>{ba14bc9d-04e7-4157-b706-ef69abeaebb2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\x64">
+      <UniqueIdentifier>{b883d21d-1554-41e6-8f56-55cf72b51a6a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Win32">
+      <UniqueIdentifier>{d6d7c805-2efb-4f05-b11e-df54e5db7078}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Win32">
+      <UniqueIdentifier>{e0ff5975-e2aa-4fc6-9115-a6cdf1936ae4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\x64\Debug">
+      <UniqueIdentifier>{f67e0833-206e-46d6-a17f-201cb0cad81f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\x64\Debug">
+      <UniqueIdentifier>{d5fa68b5-978f-44e8-8133-99a3bdd43e51}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Win32\Debug">
+      <UniqueIdentifier>{48cc1e0b-2b7e-4df9-a71d-eeb1509a103a}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Win32\Debug">
+      <UniqueIdentifier>{1bef327a-5c07-442f-b198-5344fed73f2d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\x64\Release">
+      <UniqueIdentifier>{4b0b1122-d1ba-4adb-b1fc-e62fb1207969}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\x64\Release">
+      <UniqueIdentifier>{0c550f96-4efc-444e-b1d5-b0ae4833f2d3}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Win32\Release">
+      <UniqueIdentifier>{2fe95f41-e428-40d6-a515-62a3a0578f64}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\Win32\Release">
+      <UniqueIdentifier>{f3be1bed-c4b0-408f-a391-ba3b78080ca0}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

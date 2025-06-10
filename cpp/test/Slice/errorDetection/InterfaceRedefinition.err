@@ -1,0 +1,2 @@
+InterfaceRedefinition.ice:6: redefinition of interface 'Intf1'
+InterfaceRedefinition.ice:10: redefinition of interface 'Intf2'
