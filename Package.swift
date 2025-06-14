@@ -76,19 +76,19 @@ let package = Package(
         ),
         .binaryTarget(
             name: "IceCpp",
-            url: "https://download.zeroc.com/nexus/repository/nightly//Ice-3.8.0-nightly.20250613.1.xcframework.zip",
-            checksum: "5e093d303ff1864dd36f911384ca98742e8c226542a07427fe2f92957a5d541e"
+            url: "https://download.zeroc.com/nexus/repository/nightly//Ice-3.8.0-nightly.20250614.1.xcframework.zip",
+            checksum: "73056f0e4a56a29a2b3da491a859ea75087469ac807abd2ef5e057ca38cc98d7"
         ),
         .binaryTarget(
             name: "IceDiscoveryCpp",
-            url: "https://download.zeroc.com/nexus/repository/nightly//IceDiscovery-3.8.0-nightly.20250613.1.xcframework.zip",
-            checksum: "c942ec0bace6a8497741e687f47d7d36e5acd8a111797b622d752217e454ec64"
+            url: "https://download.zeroc.com/nexus/repository/nightly//IceDiscovery-3.8.0-nightly.20250614.1.xcframework.zip",
+            checksum: "f66789751bc732fd71f4a691d20e0d0bba0e31ac3273f73dde7372e9fc27e992"
 
         ),
         .binaryTarget(
             name: "IceLocatorDiscoveryCpp",
-            url: "https://download.zeroc.com/nexus/repository/nightly//IceLocatorDiscovery-3.8.0-nightly.20250613.1.xcframework.zip",
-            checksum: "14b7f3a3ab3ffa429adf3844ef9a9bdfc548e735e26edfb179c61701b304bf18"
+            url: "https://download.zeroc.com/nexus/repository/nightly//IceLocatorDiscovery-3.8.0-nightly.20250614.1.xcframework.zip",
+            checksum: "438315ab164594929949344df0ce7f12ac6b1c950719e3eed3e75caf2bb13eed"
         ),
         .executableTarget(
             name: "slice2swift",
