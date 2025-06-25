@@ -60,6 +60,42 @@ namespace
 
         return result + "`";
     }
+
+    void writeDocLines(Output& out, const StringList& lines, bool commentFirst = true, string_view space = " ")
+    {
+        for (const auto& line : lines)
+        {
+            if (!commentFirst)
+            {
+                out << line;
+                commentFirst = true;
+                continue;
+            }
+
+            out << nl << "///";
+            if (!line.empty())
+            {
+                out << space << line;
+            }
+        }
+    }
+
+    bool writeDeprecatedDocComment(Output& out, const DocComment& comment, bool needsNewline)
+    {
+        if (!comment.isDeprecated())
+        {
+            return false;
+        }
+
+        if (needsNewline)
+        {
+            out << nl << "///";
+        }
+        out << nl << "/// ## Deprecated";
+        const StringList& docDeprecated = comment.deprecated();
+        writeDocLines(out, docDeprecated);
+        return true;
+    }
 }
 
 string
@@ -96,26 +132,6 @@ Slice::getSwiftModule(const ModulePtr& module)
 }
 
 void
-SwiftGenerator::writeDocLines(IceInternal::Output& out, const StringList& lines, bool commentFirst, const string& space)
-{
-    StringList l = lines;
-    if (!commentFirst)
-    {
-        out << l.front();
-        l.pop_front();
-    }
-
-    for (const auto& line : l)
-    {
-        out << nl << "///";
-        if (!line.empty())
-        {
-            out << space << line;
-        }
-    }
-}
-
-void
 SwiftGenerator::writeDocSummary(IceInternal::Output& out, const ContainedPtr& p)
 {
     optional<DocComment> doc = DocComment::parseFrom(p, swiftLinkFormatter);
@@ -133,21 +149,20 @@ SwiftGenerator::writeDocSummary(IceInternal::Output& out, const ContainedPtr& p)
         hasStarted = true;
     }
 
-    if (doc->isDeprecated())
+    hasStarted |= writeDeprecatedDocComment(out, *doc, hasStarted);
+
+    // TODO we should add a section for '@see' tags.
+
+    const StringList& remarks = doc->remarks();
+    if (!remarks.empty())
     {
         if (hasStarted)
         {
             out << nl << "///";
         }
-        out << nl << "/// ## Deprecated";
-        const StringList& docDeprecated = doc->deprecated();
-        if (!docDeprecated.empty())
-        {
-            writeDocLines(out, docDeprecated);
-        }
+        out << nl << "/// ## Remarks";
+        writeDocLines(out, remarks);
     }
-
-    // TODO we should add a section for '@see' tags.
 }
 
 void
@@ -170,21 +185,7 @@ SwiftGenerator::writeOpDocSummary(IceInternal::Output& out, const OperationPtr& 
     }
 
     // If the comment contained an `@deprecated` include it as a section in the overview.
-    if (doc->isDeprecated())
-    {
-        if (hasStarted)
-        {
-            out << nl << "///";
-        }
-        hasStarted = true;
-
-        out << nl << "///  ## Deprecated";
-        const StringList& docDeprecated = doc->deprecated();
-        if (!docDeprecated.empty())
-        {
-            writeDocLines(out, docDeprecated);
-        }
-    }
+    hasStarted |= writeDeprecatedDocComment(out, *doc, hasStarted);
 
     const auto& docParameters = doc->parameters();
 
@@ -231,15 +232,7 @@ SwiftGenerator::writeOpDocSummary(IceInternal::Output& out, const OperationPtr& 
     }
     if (p->returnType())
     {
-        string returnValueName = "returnValue";
-        for (const auto& q : outParams)
-        {
-            if (q->mappedName() == returnValueName)
-            {
-                returnValueName += '_';
-                break;
-            }
-        }
+        string returnValueName = getEscapedParamName(outParams, "returnValue");
 
         // First, check if the user supplied a message in the doc comment for this return type.
         const StringList& docMessage = doc->returns();
@@ -305,6 +298,14 @@ SwiftGenerator::writeOpDocSummary(IceInternal::Output& out, const OperationPtr& 
                 writeDocLines(out, docException.second, false, "     ");
             }
         }
+    }
+
+    const StringList& remarks = doc->remarks();
+    if (!remarks.empty())
+    {
+        out << nl << "///";
+        out << nl << "/// ## Remarks";
+        writeDocLines(out, remarks);
     }
 }
 
@@ -1318,11 +1319,15 @@ SwiftGenerator::writeMarshalAsyncOutParams(::IceInternal::Output& out, const Ope
     // Marshal parameters in this order '(required..., optional...)'.
 
     out << nl << "let " << operationReturnDeclaration(op) << " = value";
-    for (const auto& param : op->sortedReturnAndOutParameters("returnValue"))
+    for (const auto& param : op->sortedReturnAndOutParameters(getEscapedParamName(op->outParameters(), "returnValue")))
     {
-        // 'isOutParam' fails for return types, and for return types, we don't want the 'mappedName'.
-        const string paramName = (param->isOutParam() ? param->mappedName() : param->name());
-        writeMarshalUnmarshalCode(out, param->type(), op, "iceP_" + removeEscaping(paramName), true, param->tag());
+        writeMarshalUnmarshalCode(
+            out,
+            param->type(),
+            op,
+            "iceP_" + removeEscaping(param->mappedName()),
+            true,
+            param->tag());
     }
     if (op->returnsClasses())
     {
@@ -1348,12 +1353,11 @@ SwiftGenerator::writeUnmarshalOutParams(::IceInternal::Output& out, const Operat
     // 3. optional (including optional return)
     //
 
-    for (const auto& param : op->sortedReturnAndOutParameters("returnValue"))
+    for (const auto& param : op->sortedReturnAndOutParameters(getEscapedParamName(op->outParameters(), "returnValue")))
     {
         const TypePtr paramType = param->type();
         const string typeString = typeToString(paramType, op, param->optional());
-        // 'isOutParam' fails for return types, and for return types, we don't want the 'mappedName'.
-        const string paramName = "iceP_" + removeEscaping((param->isOutParam() ? param->mappedName() : param->name()));
+        const string paramName = "iceP_" + removeEscaping(param->mappedName());
         string paramString;
         if (paramType->isClassType())
         {
@@ -1380,15 +1384,7 @@ SwiftGenerator::writeUnmarshalOutParams(::IceInternal::Output& out, const Operat
 
     if (op->returnType())
     {
-        string returnValueName = "returnValue";
-        for (const auto& q : outParams)
-        {
-            if (removeEscaping(q->mappedName()) == returnValueName)
-            {
-                returnValueName += '_';
-                break;
-            }
-        }
+        string returnValueName = getEscapedParamName(outParams, "returnValue");
         out << ("iceP_" + returnValueName);
     }
     for (const auto& param : outParams)
