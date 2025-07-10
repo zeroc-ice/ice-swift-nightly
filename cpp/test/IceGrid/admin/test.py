@@ -2,6 +2,7 @@
 
 
 import os
+
 from Glacier2Util import Glacier2Router
 from IceGridUtil import IceGridAdmin, IceGridTestCase
 from Util import TestSuite, Windows, platform
@@ -34,9 +35,7 @@ class IceGridAdminTestCase(IceGridTestCase):
         admin.sendline(current, "exit")
         admin.stop(current, True)
 
-        defaultRouterProps = {
-            "Ice.Default.Router": self.glacier2router.getClientProxy(current)
-        }
+        defaultRouterProps = {"Ice.Default.Router": self.glacier2router.getClientProxy(current)}
 
         admin.start(current, props=defaultRouterProps)
         expect(admin, ">>> ")
@@ -74,9 +73,7 @@ class IceGridAdminTestCase(IceGridTestCase):
             serverDir = current.getBuildDir("server")
 
             expect(admin, ">>> ")
-            admin.sendline(
-                current, "application add application.xml server.dir=%s" % serverDir
-            )
+            admin.sendline(current, "application add application.xml server.dir=%s" % serverDir)
             expect(admin, ">>> ")
             admin.sendline(current, "application list")
             expect(admin, "Test")
@@ -84,14 +81,10 @@ class IceGridAdminTestCase(IceGridTestCase):
             expect(admin, "application 'Test'")
             expect(admin, "\\{.*\\}")
             expect(admin, ">>> ")
-            admin.sendline(
-                current, "application diff application.xml server.dir=%s" % serverDir
-            )
+            admin.sendline(current, "application diff application.xml server.dir=%s" % serverDir)
             expect(admin, "application 'Test'\n\\{.*\\}")
             expect(admin, ">>> ")
-            admin.sendline(
-                current, "application update application.xml server.dir=%s" % serverDir
-            )
+            admin.sendline(current, "application update application.xml server.dir=%s" % serverDir)
             expect(admin, ">>> ")
             admin.sendline(current, "server list")
             expect(admin, "server")

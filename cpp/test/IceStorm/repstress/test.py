@@ -8,9 +8,9 @@
 # truncated). See also bug #6070.
 #
 import time
+
 from IceStormUtil import IceStorm, IceStormTestCase, Publisher, Subscriber
 from Util import Client, TestSuite
-
 
 props = {
     "IceStorm.Election.MasterTimeout": 2,
@@ -102,8 +102,7 @@ class IceStormRepStressTestCase(IceStormTestCase):
         current.writeln("ok")
 
         current.writeln(
-            "publisher published %s events, subscriber received %s events"
-            % (publisherCount, subscriberCount)
+            "publisher published %s events, subscriber received %s events" % (publisherCount, subscriberCount)
         )
 
 

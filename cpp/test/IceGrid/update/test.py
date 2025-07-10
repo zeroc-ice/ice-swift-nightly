@@ -2,6 +2,7 @@
 
 
 import os
+
 from IceBoxUtil import IceBox
 from IceGridUtil import IceGridClient, IceGridNode, IceGridTestCase
 from Util import TestSuite, Windows, platform
@@ -16,9 +17,7 @@ class IceGridUpdateTestCase(IceGridTestCase):
 
 def clientProps(process, current):
     return {
-        "NodePropertiesOverride": current.testcase.icegridnode[0].getPropertiesOverride(
-            current
-        ),
+        "NodePropertiesOverride": current.testcase.icegridnode[0].getPropertiesOverride(current),
         "IceBoxExe": IceBox().getCommandLine(current),
         "IceGridNodeExe": IceGridNode().getCommandLine(current),
         "ServerDir": current.getBuildDir("server"),
@@ -29,10 +28,6 @@ def clientProps(process, current):
 if isinstance(platform, Windows) or os.getuid() != 0:
     TestSuite(
         __file__,
-        [
-            IceGridUpdateTestCase(
-                application=None, client=IceGridClient(props=clientProps)
-            )
-        ],
+        [IceGridUpdateTestCase(application=None, client=IceGridClient(props=clientProps))],
         multihost=False,
     )

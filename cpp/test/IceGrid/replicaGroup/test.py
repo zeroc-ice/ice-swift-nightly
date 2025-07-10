@@ -1,9 +1,9 @@
 # Copyright (c) ZeroC, Inc.
 
 import os
+
 from IceGridUtil import IceGridClient, IceGridRegistryMaster, IceGridTestCase
 from Util import TestSuite, Windows, platform
-
 
 registryProps = {
     "Ice.Plugin.RegistryPlugin": "RegistryPlugin:createRegistryPlugin",
@@ -25,11 +25,7 @@ if isinstance(platform, Windows) or os.getuid() != 0:
         __file__,
         [
             IceGridTestCase(
-                icegridregistry=[
-                    IceGridRegistryMaster(
-                        props=registryProps, traceProps=registryTraceProps
-                    )
-                ],
+                icegridregistry=[IceGridRegistryMaster(props=registryProps, traceProps=registryTraceProps)],
                 client=IceGridClient(props=clientProps, traceProps=clientTraceProps),
             )
         ],
