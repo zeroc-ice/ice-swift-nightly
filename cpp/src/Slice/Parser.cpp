@@ -2,6 +2,7 @@
 
 #include "Parser.h"
 #include "DeprecationReporter.h"
+#include "DocCommentParser.h"
 #include "Ice/StringUtil.h"
 #include "Util.h"
 
@@ -293,44 +294,11 @@ namespace
         }
     }
 
-    StringList splitComment(string comment, bool escapeXml)
+    StringList splitComment(const string& comment)
     {
-        string::size_type pos = 0;
-
-        // Escape XML entities.
-        if (escapeXml)
-        {
-            const string amp = "&amp;";
-            const string lt = "&lt;";
-            const string gt = "&gt;";
-
-            pos = 0;
-            while ((pos = comment.find_first_of("&<>", pos)) != string::npos)
-            {
-                switch (comment[pos])
-                {
-                    case '&':
-                        comment.replace(pos, 1, amp);
-                        pos += amp.size();
-                        break;
-                    case '<':
-                        comment.replace(pos, 1, lt);
-                        pos += lt.size();
-                        break;
-                    case '>':
-                        comment.replace(pos, 1, gt);
-                        pos += gt.size();
-                        break;
-                    default:
-                        assert(false);
-                        break;
-                }
-            }
-        }
-
         // Split the comment into separate lines, and removing any trailing whitespace and lines from it.
         StringList result;
-        pos = 0;
+        string::size_type pos = 0;
         string::size_type nextPos;
         while ((nextPos = comment.find_first_of('\n', pos)) != string::npos)
         {
@@ -440,13 +408,64 @@ namespace
 }
 
 optional<DocComment>
-Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatter, bool escapeXml)
+Slice::DocComment::createUnparsed(const string& rawDocComment)
 {
     // Split the comment's raw text up into lines.
-    StringList lines = splitComment(p->docComment(), escapeXml);
+    StringList lines = splitComment(rawDocComment);
     if (lines.empty())
     {
         return nullopt;
+    }
+    else
+    {
+        DocComment comment;
+        comment._rawDocCommentLines = std::move(lines);
+        return comment;
+    }
+}
+
+void
+Slice::DocComment::parse(const ContainedPtr& p, const DocLinkFormatter& linkFormatter)
+{
+    // TODO: this is a temporary hack since only "csharp" happens to set 'escapeXml'.
+    // If true, escapes all XML special characters in the parsed comment. Defaults to false.
+    const bool escapeXml = (p->unit()->languageName() == "cs");
+
+    // Split the comment's raw text up into lines.
+    StringList lines = _rawDocCommentLines;
+
+    // Escape any XML entities if necessary.
+    if (escapeXml)
+    {
+        const string amp = "&amp;";
+        const string lt = "&lt;";
+        const string gt = "&gt;";
+
+        for (auto& line : lines)
+        {
+            string::size_type pos = 0;
+            while ((pos = line.find_first_of("&<>", pos)) != string::npos)
+            {
+                switch (line[pos])
+                {
+                    case '&':
+                        line.replace(pos, 1, amp);
+                        pos += amp.size();
+                        break;
+                    case '<':
+                        line.replace(pos, 1, lt);
+                        pos += lt.size();
+                        break;
+                    case '>':
+                        line.replace(pos, 1, gt);
+                        pos += gt.size();
+                        break;
+                    default:
+                        assert(false);
+                        break;
+                }
+            }
+        }
     }
 
     // Fix any link tags using the provided link formatter.
@@ -484,7 +503,7 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
                 }
 
                 // Finally, insert a correctly formatted link where the '{@link foo}' used to be.
-                string formattedLink = linkFormatter(linkText, p, linkTarget);
+                string formattedLink = (*linkFormatter)(linkText, p, linkTarget);
                 line.insert(pos, formattedLink);
                 pos += formattedLink.length();
             }
@@ -506,8 +525,7 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
     const string returnTag = "@return";
     const string deprecatedTag = "@deprecated";
 
-    DocComment comment;
-    StringList* currentSection = &comment._overview;
+    StringList* currentSection = &_overview;
     string lineText;
     string name;
 
@@ -538,7 +556,7 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
                 }
 
                 // Check if this is a duplicate tag. If it is, ignore it and issue a warning.
-                if (comment._parameters.count(name) != 0)
+                if (_parameters.count(name) != 0)
                 {
                     const string msg = "ignoring duplicate doc-comment tag: '" + paramTag + " " + name + "'";
                     p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
@@ -546,8 +564,8 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
                 }
                 else
                 {
-                    comment._parameters[name] = {};
-                    currentSection = &comment._parameters[name];
+                    _parameters[name] = {};
+                    currentSection = &_parameters[name];
                 }
             }
         }
@@ -588,7 +606,7 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
                     }
 
                     // Check if this is a duplicate tag. If it is, ignore it and issue a warning.
-                    if (comment._exceptions.count(name) != 0)
+                    if (_exceptions.count(name) != 0)
                     {
                         const string msg = "ignoring duplicate doc-comment tag: '" + actualTag + " " + name + "'";
                         p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
@@ -596,19 +614,19 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
                     }
                     else
                     {
-                        comment._exceptions[name] = {};
-                        currentSection = &comment._exceptions[name];
+                        _exceptions[name] = {};
+                        currentSection = &_exceptions[name];
                     }
                 }
             }
         }
         else if (parseCommentLine(line, remarkTag, lineText) || parseCommentLine(line, remarksTag, lineText))
         {
-            currentSection = &comment._remarks;
+            currentSection = &_remarks;
         }
         else if (parseCommentLine(line, seeTag, lineText))
         {
-            currentSection = &comment._seeAlso;
+            currentSection = &_seeAlso;
 
             // Remove any leading and trailing whitespace from the line.
             // There's no concern of losing formatting for `@see` due to its simplicity.
@@ -646,7 +664,7 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
                 }
 
                 // Check if this is a duplicate tag. If it is, ignore it and issue a warning.
-                if (!comment._returns.empty())
+                if (!_returns.empty())
                 {
                     const string msg = "ignoring duplicate doc-comment tag: '" + returnTag + "'";
                     p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
@@ -654,14 +672,14 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
                 }
                 else
                 {
-                    currentSection = &comment._returns;
+                    currentSection = &_returns;
                 }
             }
         }
         else if (parseCommentLine(line, deprecatedTag, lineText))
         {
             // Check if this is a duplicate tag (ie. multiple '@deprecated'). If it is, ignore it and issue a warning.
-            if (comment._isDeprecated)
+            if (_isDeprecated)
             {
                 const string msg = "ignoring duplicate doc-comment tag: '" + deprecatedTag + "'";
                 p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
@@ -669,8 +687,8 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
             }
             else
             {
-                comment._isDeprecated = true;
-                currentSection = &comment._deprecated;
+                _isDeprecated = true;
+                currentSection = &_deprecated;
             }
         }
         else // This line didn't introduce a new tag. Either we're in the overview or a tag whose content is multi-line.
@@ -687,7 +705,7 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
                 }
 
                 // '@see' tags are not allowed to span multiple lines.
-                if (currentSection == &comment._seeAlso)
+                if (currentSection == &_seeAlso)
                 {
                     string msg = "'@see' tags cannot span multiple lines and must be of the form: '@see identifier'";
                     p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
@@ -712,12 +730,10 @@ Slice::DocComment::parseFrom(const ContainedPtr& p, DocLinkFormatter linkFormatt
         }
     }
 
-    trimLines(comment._overview);
-    trimLines(comment._remarks);
-    trimLines(comment._deprecated);
-    trimLines(comment._returns);
-
-    return comment;
+    trimLines(_overview);
+    trimLines(_remarks);
+    trimLines(_deprecated);
+    trimLines(_returns);
 }
 
 bool
@@ -1043,7 +1059,7 @@ Slice::Contained::line() const
     return _line;
 }
 
-string
+const optional<DocComment>&
 Slice::Contained::docComment() const
 {
     return _docComment;
@@ -1161,7 +1177,7 @@ Slice::Contained::Contained(const ContainerPtr& container, string name) : _conta
     UnitPtr unit = container->unit();
     _file = unit->currentFile();
     _line = unit->currentLine();
-    _docComment = unit->currentDocComment();
+    _docComment = DocComment::createUnparsed(unit->currentDocComment());
     _includeLevel = unit->currentIncludeLevel();
     _definitionContext = unit->currentDefinitionContext();
 }
@@ -1577,37 +1593,42 @@ Slice::Container::createStruct(const string& name, NodeType nodeType)
 }
 
 SequencePtr
-Slice::Container::createSequence(const string& name, const TypePtr& type, MetadataList metadata, NodeType nodeType)
+Slice::Container::createSequence(const string& name, const TypePtr& type, MetadataList metadata)
 {
-    ContainedList matches = unit()->findContents(thisScope() + name);
-    if (!matches.empty())
+    SequencePtr p = make_shared<Sequence>(shared_from_this(), name, type, std::move(metadata));
+    _contents.push_back(p);
+
+    checkForGlobalDefinition("sequences");
+
+    if (!name.empty())
     {
-        if (matches.front()->name() == name)
+        ContainedList matches = unit()->findContents(thisScope() + name);
+        if (!matches.empty())
         {
-            ostringstream os;
-            os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as sequence";
-            unit()->error(os.str());
+            if (matches.front()->name() == name)
+            {
+                ostringstream os;
+                os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as sequence";
+                unit()->error(os.str());
+            }
+            else
+            {
+                ostringstream os;
+                os << "sequence '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
+                   << " '" << matches.front()->name() << "'";
+                unit()->error(os.str());
+            }
         }
         else
         {
-            ostringstream os;
-            os << "sequence '" << name << "' differs only in capitalization from " << matches.front()->kindOf() << " '"
-               << matches.front()->name() << "'";
-            unit()->error(os.str());
+            // If this definition has a valid identifier and doesn't conflict with another definition,
+            // add it to the unit's contentMap so it can be looked up later.
+            unit()->addContent(p);
         }
-        return nullptr;
+
+        checkIdentifier(name);
     }
 
-    checkIdentifier(name); // Don't return here -- we create the sequence anyway.
-
-    if (nodeType == Real)
-    {
-        checkForGlobalDefinition("sequences"); // Don't return here -- we create the sequence anyway.
-    }
-
-    SequencePtr p = make_shared<Sequence>(shared_from_this(), name, type, std::move(metadata));
-    unit()->addContent(p);
-    _contents.push_back(p);
     return p;
 }
 
@@ -1617,43 +1638,8 @@ Slice::Container::createDictionary(
     const TypePtr& keyType,
     MetadataList keyMetadata,
     const TypePtr& valueType,
-    MetadataList valueMetadata,
-    NodeType nodeType)
+    MetadataList valueMetadata)
 {
-    ContainedList matches = unit()->findContents(thisScope() + name);
-    if (!matches.empty())
-    {
-        if (matches.front()->name() == name)
-        {
-            ostringstream os;
-            os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as dictionary";
-            unit()->error(os.str());
-        }
-        else
-        {
-            ostringstream os;
-            os << "dictionary '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
-               << " '" << matches.front()->name() << "'";
-            unit()->error(os.str());
-        }
-        return nullptr;
-    }
-
-    checkIdentifier(name); // Don't return here -- we create the dictionary anyway.
-
-    if (nodeType == Real)
-    {
-        checkForGlobalDefinition("dictionaries"); // Don't return here -- we create the dictionary anyway.
-
-        if (keyType && !Dictionary::isLegalKeyType(keyType))
-        {
-            ostringstream os;
-            os << "dictionary '" << name << "' uses an illegal key type";
-            unit()->error(os.str());
-            return nullptr;
-        }
-    }
-
     DictionaryPtr p = make_shared<Dictionary>(
         shared_from_this(),
         name,
@@ -1661,43 +1647,83 @@ Slice::Container::createDictionary(
         std::move(keyMetadata),
         valueType,
         std::move(valueMetadata));
-    unit()->addContent(p);
     _contents.push_back(p);
+
+    checkForGlobalDefinition("dictionaries");
+    if (keyType && !Dictionary::isLegalKeyType(keyType))
+    {
+        unit()->error("dictionary '" + name + "' uses an illegal key type");
+    }
+
+    if (!name.empty())
+    {
+        ContainedList matches = unit()->findContents(thisScope() + name);
+        if (!matches.empty())
+        {
+            if (matches.front()->name() == name)
+            {
+                ostringstream os;
+                os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as dictionary";
+                unit()->error(os.str());
+            }
+            else
+            {
+                ostringstream os;
+                os << "dictionary '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
+                   << " '" << matches.front()->name() << "'";
+                unit()->error(os.str());
+            }
+        }
+        else
+        {
+            // If this definition has a valid identifier and doesn't conflict with another definition,
+            // add it to the unit's contentMap so it can be looked up later.
+            unit()->addContent(p);
+        }
+
+        checkIdentifier(name);
+    }
+
     return p;
 }
 
 EnumPtr
-Slice::Container::createEnum(const string& name, NodeType nodeType)
+Slice::Container::createEnum(const string& name)
 {
-    ContainedList matches = unit()->findContents(thisScope() + name);
-    if (!matches.empty())
+    EnumPtr p = make_shared<Enum>(shared_from_this(), name);
+    _contents.push_back(p);
+
+    checkForGlobalDefinition("enums");
+
+    if (!name.empty())
     {
-        if (matches.front()->name() == name)
+        ContainedList matches = unit()->findContents(thisScope() + name);
+        if (!matches.empty())
         {
-            ostringstream os;
-            os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as enumeration";
-            unit()->error(os.str());
+            if (matches.front()->name() == name)
+            {
+                ostringstream os;
+                os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as enumeration";
+                unit()->error(os.str());
+            }
+            else
+            {
+                ostringstream os;
+                os << "enumeration '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
+                   << " '" << matches.front()->name() << "'";
+                unit()->error(os.str());
+            }
         }
         else
         {
-            ostringstream os;
-            os << "enumeration '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
-               << " '" << matches.front()->name() << "'";
-            unit()->error(os.str());
+            // If this definition has a valid identifier and doesn't conflict with another definition,
+            // add it to the unit's contentMap so it can be looked up later.
+            unit()->addContent(p);
         }
-        return nullptr;
+
+        checkIdentifier(name);
     }
 
-    checkIdentifier(name); // Don't return here -- we create the enumeration anyway.
-
-    if (nodeType == Real)
-    {
-        checkForGlobalDefinition("enums"); // Don't return here -- we create the enumeration anyway.
-    }
-
-    EnumPtr p = make_shared<Enum>(shared_from_this(), name);
-    unit()->addContent(p);
-    _contents.push_back(p);
     return p;
 }
 
@@ -1707,47 +1733,45 @@ Slice::Container::createConst(
     const TypePtr& type,
     MetadataList metadata,
     const SyntaxTreeBasePtr& valueType,
-    const string& valueString,
-    NodeType nodeType)
+    const string& valueString)
 {
-    ContainedList matches = unit()->findContents(thisScope() + name);
-    if (!matches.empty())
+    SyntaxTreeBasePtr resolvedValueType = valueType;
+    validateConstant(name, type, resolvedValueType, valueString, true);
+    ConstPtr p =
+        make_shared<Const>(shared_from_this(), name, type, std::move(metadata), resolvedValueType, valueString);
+    _contents.push_back(p);
+
+    checkForGlobalDefinition("constants");
+
+    if (!name.empty())
     {
-        if (matches.front()->name() == name)
+        ContainedList matches = unit()->findContents(thisScope() + name);
+        if (!matches.empty())
         {
-            ostringstream os;
-            os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as constant";
-            unit()->error(os.str());
+            if (matches.front()->name() == name)
+            {
+                ostringstream os;
+                os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as constant";
+                unit()->error(os.str());
+            }
+            else
+            {
+                ostringstream os;
+                os << "constant '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
+                   << " '" << matches.front()->name() << "'";
+                unit()->error(os.str());
+            }
         }
         else
         {
-            ostringstream os;
-            os << "constant '" << name << "' differs only in capitalization from " << matches.front()->kindOf() << " '"
-               << matches.front()->name() << "'";
-            unit()->error(os.str());
+            // If this definition has a valid identifier and doesn't conflict with another definition,
+            // add it to the unit's contentMap so it can be looked up later.
+            unit()->addContent(p);
         }
-        return nullptr;
+
+        checkIdentifier(name);
     }
 
-    checkIdentifier(name); // Don't return here -- we create the constant anyway.
-
-    if (nodeType == Real)
-    {
-        checkForGlobalDefinition("constants"); // Don't return here -- we create the constant anyway.
-    }
-
-    SyntaxTreeBasePtr resolvedValueType = valueType;
-
-    // Validate the constant and its value; for enums, find enumerator
-    if (nodeType == Real && !validateConstant(name, type, resolvedValueType, valueString, true))
-    {
-        return nullptr;
-    }
-
-    ConstPtr p =
-        make_shared<Const>(shared_from_this(), name, type, std::move(metadata), resolvedValueType, valueString);
-    unit()->addContent(p);
-    _contents.push_back(p);
     return p;
 }
 
@@ -2136,12 +2160,12 @@ Slice::Container::visitContents(ParserVisitor* visitor)
     }
 }
 
-bool
+void
 Slice::Container::checkIntroduced(const string& scopedName, ContainedPtr namedThing)
 {
-    if (scopedName[0] == ':') // Only unscoped names introduce anything.
+    if (scopedName.empty() || scopedName[0] == ':') // Only unscoped names introduce anything.
     {
-        return true;
+        return;
     }
 
     // Split off first component.
@@ -2154,7 +2178,7 @@ Slice::Container::checkIntroduced(const string& scopedName, ContainedPtr namedTh
         ContainedList cl = lookupContained(firstComponent, false);
         if (cl.empty())
         {
-            return true; // Ignore types whose creation failed previously.
+            return; // Ignore types whose creation failed previously.
         }
         namedThing = cl.front();
     }
@@ -2203,26 +2227,22 @@ Slice::Container::checkIntroduced(const string& scopedName, ContainedPtr namedTh
         // We've previously introduced the first component to the current scope, check that it has not changed meaning.
         if (it->second->scoped() != namedThing->scoped())
         {
-            // Parameter are in its own scope.
-            if ((dynamic_pointer_cast<Parameter>(it->second) && !dynamic_pointer_cast<Parameter>(namedThing)) ||
-                (!dynamic_pointer_cast<Parameter>(it->second) && dynamic_pointer_cast<Parameter>(namedThing)))
+            // Parameters and data members are in their own scopes. So they can't conflict with other elements.
+            const bool isFirstAParameter = static_cast<bool>(dynamic_pointer_cast<Parameter>(it->second));
+            const bool isSecondAParameter = static_cast<bool>(dynamic_pointer_cast<Parameter>(namedThing));
+            const bool isFirstADataMember = static_cast<bool>(dynamic_pointer_cast<DataMember>(it->second));
+            const bool isSecondADataMember = static_cast<bool>(dynamic_pointer_cast<DataMember>(namedThing));
+
+            // We don't want to emit an error if one of them is a parameter/member, but the other isn't.
+            // For example, if one is a parameter and the other is a class, they're logically in different scopes.
+            // But, if both of them _are_ a parameter, or both of them _are not_ a parameter, then they're in the same
+            // scope, and we should report an error. The same applies for data members.
+            if ((isFirstAParameter == isSecondAParameter) && (isFirstADataMember == isSecondADataMember))
             {
-                return true;
+                unit()->error("'" + firstComponent + "' has changed meaning");
             }
-
-            // Data members are in its own scope.
-            if ((dynamic_pointer_cast<DataMember>(it->second) && !dynamic_pointer_cast<DataMember>(namedThing)) ||
-                (!dynamic_pointer_cast<DataMember>(it->second) && dynamic_pointer_cast<DataMember>(namedThing)))
-            {
-                return true;
-            }
-
-            unit()->error("'" + firstComponent + "' has changed meaning");
-
-            return false;
         }
     }
-    return true;
 }
 
 bool
@@ -2822,7 +2842,7 @@ Slice::ClassDef::ClassDef(const ContainerPtr& container, const string& name, int
       _base(std::move(base)),
       _compactId(id)
 {
-    if (_compactId != -1)
+    if (_compactId != -1 && !name.empty())
     {
         unit()->addTypeId(_compactId, scoped());
     }
@@ -5005,6 +5025,7 @@ Slice::Unit::findDefinitionContext(string_view file) const
 void
 Slice::Unit::addContent(const ContainedPtr& contained)
 {
+    assert(!contained->name().empty());
     string scoped = IceInternal::toLower(contained->scoped());
     _contentMap[scoped].push_back(contained);
 }

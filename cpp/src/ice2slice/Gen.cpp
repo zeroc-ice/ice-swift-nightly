@@ -221,7 +221,7 @@ namespace
 
     void writeDocComment(const ContainedPtr& contained, Output& out)
     {
-        optional<DocComment> comment = DocComment::parseFrom(contained, slice2LinkFormatter);
+        const optional<DocComment>& comment = contained->docComment();
         if (!comment)
         {
             return;
