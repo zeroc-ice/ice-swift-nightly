@@ -167,7 +167,6 @@ Slice::JavaVisitor::writeMarshalUnmarshalCode(
                 }
                 return;
             }
-            case Builtin::KindObject:
             case Builtin::KindValue:
             {
                 assert(false); // already handled by 'isClassType' check above.
@@ -1058,7 +1057,7 @@ Slice::JavaVisitor::writeResultType(
                     writeDocCommentLines(out, q->second);
                 }
             }
-            out << nl << " **/";
+            out << nl << " */";
         }
 
         out << nl << "public " << opName << "Result" << spar;
@@ -1188,7 +1187,7 @@ Slice::JavaVisitor::writeMarshaledResultType(
             }
         }
         out << nl << " * @param " << currentParamName << " The Current object of the incoming request.";
-        out << nl << " **/";
+        out << nl << " */";
     }
 
     bool hasOpt = false;
@@ -1258,7 +1257,7 @@ Slice::JavaVisitor::writeMarshaledResultType(
                 }
             }
             out << nl << " * @param " << currentParamName << " The Current object of the incoming request.";
-            out << nl << " **/";
+            out << nl << " */";
         }
 
         out << nl << "public " << opName << "MarshaledResult" << spar;
@@ -1368,7 +1367,7 @@ Slice::JavaVisitor::writeSyncIceInvokeMethods(
 
     const string contextParamName = getEscapedParamName(p->parameters(), "context");
     const string contextDoc = "@param " + contextParamName + " The Context map to send with the invocation.";
-    const string contextParam = "java.util.Map<String, String> " + contextParamName;
+    const string contextParam = "java.util.Map<java.lang.String, java.lang.String> " + contextParamName;
     const string noExplicitContextArg = "com.zeroc.Ice.ObjectPrx.noExplicitContext";
 
     const bool returnsParams = p->returnsAnyValues();
@@ -1455,7 +1454,7 @@ Slice::JavaVisitor::writeAsyncIceInvokeMethods(
 
     const string contextParamName = getEscapedParamName(p->parameters(), "context");
     const string contextDoc = "@param " + contextParamName + " The Context map to send with the invocation.";
-    const string contextParam = "java.util.Map<String, String> " + contextParamName;
+    const string contextParam = "java.util.Map<java.lang.String, java.lang.String> " + contextParamName;
     const string noExplicitContextArg = "com.zeroc.Ice.ObjectPrx.noExplicitContext";
     const vector<string> args = getInArgs(p);
 
@@ -1500,8 +1499,8 @@ Slice::JavaVisitor::writeIceIHelperMethods(
     // Generate the internal method '_iceI_<NAME>Async'.
     out << sp;
     out << nl << "private " << futureImplType << " _iceI_" << name << "Async" << spar
-        << getParamsProxy(p, package, optionalMapping, true) << "java.util.Map<String, String> context"
-        << "boolean sync" << epar;
+        << getParamsProxy(p, package, optionalMapping, true)
+        << "java.util.Map<java.lang.String, java.lang.String> context" << "boolean sync" << epar;
     out << sb;
     out << nl << futureImplType << " f = new com.zeroc.Ice.OutgoingAsync<>(this, \"" << p->name() << "\", "
         << sliceModeToIceMode(p->mode()) << ", sync, " << (hasExceptionSpecification ? "_iceE_" + name : "null")
@@ -1871,7 +1870,6 @@ Slice::JavaVisitor::writeConstantValue(
                 case Builtin::KindShort:
                 case Builtin::KindInt:
                 case Builtin::KindDouble:
-                case Builtin::KindObject:
                 case Builtin::KindObjectProxy:
                 case Builtin::KindValue:
                 {
@@ -2091,7 +2089,7 @@ Slice::JavaVisitor::writeDocComment(Output& out, const UnitPtr& unt, const optio
         out << nl << " * @deprecated";
     }
 
-    out << nl << " **/";
+    out << nl << " */";
 }
 
 void
@@ -2102,7 +2100,7 @@ Slice::JavaVisitor::writeDocComment(Output& out, const string& text)
         out << nl << "/**";
         out << nl << " * ";
         writeDocCommentLines(out, text);
-        out << nl << " **/";
+        out << nl << " */";
     }
 }
 
@@ -2230,7 +2228,7 @@ Slice::JavaVisitor::writeProxyOpDocComment(
         out << nl << " * @deprecated";
     }
 
-    out << nl << " **/";
+    out << nl << " */";
 }
 
 void
@@ -2330,7 +2328,7 @@ Slice::JavaVisitor::writeServantOpDocComment(Output& out, const OperationPtr& p,
         }
     }
 
-    out << nl << " **/";
+    out << nl << " */";
 }
 
 void
@@ -2648,7 +2646,7 @@ Slice::Gen::TypesVisitor::visitClassDefEnd(const ClassDefPtr& p)
     out << nl << " *";
     out << nl << " * @return the string \"" << p->scoped() << "\"";
     out << nl << " */";
-    out << nl << "public static String ice_staticId()";
+    out << nl << "public static java.lang.String ice_staticId()";
     out << sb;
     out << nl << "return \"" << p->scoped() << "\";";
     out << eb;
@@ -2657,7 +2655,7 @@ Slice::Gen::TypesVisitor::visitClassDefEnd(const ClassDefPtr& p)
     out << sp;
     writeDocComment(out, "{@inheritDoc}");
     out << nl << "@Override";
-    out << nl << "public String ice_id()";
+    out << nl << "public java.lang.String ice_id()";
     out << sb;
     out << nl << "return ice_staticId();";
     out << eb;
@@ -2922,7 +2920,7 @@ Slice::Gen::TypesVisitor::visitExceptionEnd(const ExceptionPtr& p)
     out << sp;
     writeDocComment(out, "{@inheritDoc}");
     out << nl << "@Override";
-    out << nl << "public String ice_id()";
+    out << nl << "public java.lang.String ice_id()";
     out << sb;
     out << nl << "return \"" << p->scoped() << "\";";
     out << eb;
@@ -3117,7 +3115,6 @@ Slice::Gen::TypesVisitor::visitStructEnd(const StructPtr& p)
                 }
 
                 case Builtin::KindString:
-                case Builtin::KindObject:
                 case Builtin::KindObjectProxy:
                 case Builtin::KindValue:
                 {
@@ -3209,7 +3206,7 @@ Slice::Gen::TypesVisitor::visitStructEnd(const StructPtr& p)
     out << nl << "try";
     out << sb;
     out << nl << "c = (" << name << ") super.clone();";
-    out << eb << " catch (CloneNotSupportedException ex)";
+    out << eb << " catch (java.lang.CloneNotSupportedException ex)";
     out << sb;
     out << nl << "assert false; // impossible";
     out << eb;
@@ -4213,7 +4210,7 @@ Slice::Gen::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
 {
     Output& out = output();
 
-    const string contextParam = "java.util.Map<String, String> context";
+    const string contextParam = "java.util.Map<java.lang.String, java.lang.String> context";
     const string prxName = p->mappedName() + "Prx";
     const string prxIName = "_" + prxName + "I";
 
@@ -4225,7 +4222,8 @@ Slice::Gen::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
             "@param communicator The communicator of the new proxy.\n"
             "@param proxyString The string representation of the proxy.\n"
             "@return The new proxy.");
-    out << nl << "static " << prxName << " createProxy(com.zeroc.Ice.Communicator communicator, String proxyString)";
+    out << nl << "static " << prxName
+        << " createProxy(com.zeroc.Ice.Communicator communicator, java.lang.String proxyString)";
     out << sb;
     out << nl << "return new " << prxIName << "(com.zeroc.Ice.ObjectPrx.createProxy(communicator, proxyString));";
     out << eb;
@@ -4263,7 +4261,7 @@ Slice::Gen::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
         "@param obj The untyped proxy.\n"
         "@param facet The name of the desired facet.\n"
         "@return A proxy for this type, or null if the object does not support this type.");
-    out << nl << "static " << prxName << " checkedCast(com.zeroc.Ice.ObjectPrx obj, String facet)";
+    out << nl << "static " << prxName << " checkedCast(com.zeroc.Ice.ObjectPrx obj, java.lang.String facet)";
     out << sb;
     out << nl << "return checkedCast(obj, facet, noExplicitContext);";
     out << eb;
@@ -4277,8 +4275,8 @@ Slice::Gen::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
         "@param facet The name of the desired facet.\n"
         "@param context The Context map to send with the invocation.\n"
         "@return A proxy for this type, or null if the object does not support this type.");
-    out << nl << "static " << prxName << " checkedCast(com.zeroc.Ice.ObjectPrx obj, String facet, " << contextParam
-        << ')';
+    out << nl << "static " << prxName << " checkedCast(com.zeroc.Ice.ObjectPrx obj, java.lang.String facet, "
+        << contextParam << ')';
     out << sb;
     out << nl << "return (obj == null) ? null : checkedCast(obj.ice_facet(facet), context);";
     out << eb;
@@ -4301,15 +4299,15 @@ Slice::Gen::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
         "@param obj The untyped proxy.\n"
         "@param facet The name of the desired facet.\n"
         "@return A proxy for this type.");
-    out << nl << "static " << prxName << " uncheckedCast(com.zeroc.Ice.ObjectPrx obj, String facet)";
+    out << nl << "static " << prxName << " uncheckedCast(com.zeroc.Ice.ObjectPrx obj, java.lang.String facet)";
     out << sb;
     out << nl << "return (obj == null) ? null : new " << prxIName << "(obj.ice_facet(facet));";
     out << eb;
 
     // Generate overrides for all the methods on `ObjectPrx` with covariant return types.
     static constexpr string_view objectPrxMethods[] = {
-        "ice_context(java.util.Map<String, String> newContext)",
-        "ice_adapterId(String newAdapterId)",
+        "ice_context(java.util.Map<java.lang.String, java.lang.String> newContext)",
+        "ice_adapterId(java.lang.String newAdapterId)",
         "ice_endpoints(com.zeroc.Ice.Endpoint[] newEndpoints)",
         "ice_locatorCacheTimeout(int newTimeout)",
         "ice_invocationTimeout(int newTimeout)",
@@ -4327,7 +4325,7 @@ Slice::Gen::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
         "ice_datagram()",
         "ice_batchDatagram()",
         "ice_compress(boolean co)",
-        "ice_connectionId(String connectionId)",
+        "ice_connectionId(java.lang.String connectionId)",
         "ice_fixed(com.zeroc.Ice.Connection connection)",
     };
     for (const auto& method : objectPrxMethods)
@@ -4343,7 +4341,7 @@ Slice::Gen::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
     out << nl << " *";
     out << nl << " * @return the string \"" << p->scoped() << "\"";
     out << nl << " */";
-    out << nl << "static String ice_staticId()";
+    out << nl << "static java.lang.String ice_staticId()";
     out << sb;
     out << nl << "return \"" << p->scoped() << "\";";
     out << eb;
@@ -4445,7 +4443,7 @@ Slice::Gen::TypesVisitor::visitOperation(const OperationPtr& p)
     {
         out << sp;
         writeHiddenDocComment(out);
-        out << nl << "static final Class<?>[] _iceE_" << p->mappedName() << " =";
+        out << nl << "static final java.lang.Class<?>[] _iceE_" << p->mappedName() << " =";
         out << sb;
         for (auto t = throws.begin(); t != throws.end(); ++t)
         {
@@ -4541,7 +4539,7 @@ Slice::Gen::ServantVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
     out << nl << " *";
     out << nl << " * @return the string \"" << p->scoped() << "\"";
     out << nl << " */";
-    out << nl << "static String ice_staticId()";
+    out << nl << "static java.lang.String ice_staticId()";
     out << sb;
 
     out << nl << "return \"" << p->scoped() << "\";";
