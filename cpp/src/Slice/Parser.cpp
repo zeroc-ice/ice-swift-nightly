@@ -327,135 +327,26 @@ Slice::DefinitionContext::initSuppressedWarnings()
 // DocComment
 // ----------------------------------------------------------------------
 
-namespace
-{
-    void trimLines(StringList& lines)
-    {
-        // Remove empty trailing lines.
-        while (!lines.empty() && lines.back().empty())
-        {
-            lines.pop_back();
-        }
-    }
-
-    StringList splitComment(const string& comment)
-    {
-        // Split the comment into separate lines, and removing any trailing whitespace and lines from it.
-        StringList result;
-        string::size_type pos = 0;
-        string::size_type nextPos;
-        while ((nextPos = comment.find_first_of('\n', pos)) != string::npos)
-        {
-            result.push_back(IceInternal::trim(comment.substr(pos, nextPos - pos)));
-            pos = nextPos + 1;
-        }
-        result.push_back(IceInternal::trim(comment.substr(pos)));
-
-        trimLines(result);
-        return result;
-    }
-
-    bool parseCommentLine(string_view line, string_view tag, string& doc)
-    {
-        const string ws = " \t";
-        const auto tagLength = tag.size();
-
-        // If the line doesn't start with the provided tag, we immediately return false.
-        // Note that any leading whitespace has already been stripped off here.
-        if (line.find(tag) != 0)
-        {
-            return false;
-        }
-
-        // The tag must be immediately followed by whitespace, or be the entire line (for multiline tags).
-        if (line.find_first_of(ws, tagLength) != tagLength && line.length() != tagLength)
-        {
-            return false;
-        }
-
-        // Find the first non-whitespace character after the tag. This marks the start of the `doc` string.
-        const auto docSplitPos = line.find_first_not_of(ws, tagLength);
-        if (docSplitPos != string::npos)
-        {
-            doc = line.substr(docSplitPos);
-        }
-        return true;
-    }
-
-    bool parseNamedCommentLine(string_view line, string_view tag, string& name, string& doc)
-    {
-        const string ws = " \t";
-
-        // First we check for the tag and parse the doc-comment normally.
-        if (parseCommentLine(line, tag, doc))
-        {
-            // Then we perform additional parsing to extract the name...
-
-            auto nameStart = line.find_first_not_of(ws, tag.size());
-            if (nameStart == string::npos)
-            {
-                return false; // Malformed line, ignore it.
-            }
-
-            auto nameEnd = line.find_first_of(ws, nameStart);
-            if (nameEnd == string::npos)
-            {
-                return false; // Malformed line, ignore it.
-            }
-            name = line.substr(nameStart, nameEnd - nameStart);
-
-            // Store whatever remains of the doc comment in the `doc` string.
-            auto docSplitPos = line.find_first_not_of(ws, nameEnd);
-            if (docSplitPos != string::npos)
-            {
-                doc = line.substr(docSplitPos);
-            }
-
-            return true;
-        }
-        return false;
-    }
-
-    /// Returns a pointer to the Slice element referenced by `linkText`, relative to the scope of `source`.
-    /// If the link cannot be resolved, `nullptr` is returned instead.
-    SyntaxTreeBasePtr resolveDocLink(string linkText, const ContainedPtr& source)
-    {
-        // First we check if the link is to a builtin type.
-        if (auto kind = Builtin::kindFromString(linkText))
-        {
-            return source->unit()->createBuiltin(kind.value());
-        }
-
-        // Then, before checking for user-defined types, we determine which scope we'll be searching relative to.
-        ContainerPtr linkSourceScope = dynamic_pointer_cast<Container>(source);
-        if (!linkSourceScope || dynamic_pointer_cast<Operation>(source))
-        {
-            linkSourceScope = source->container();
-        }
-
-        // Perform the actual lookup.
-        auto separatorPos = linkText.find('#');
-        if (separatorPos == 0)
-        {
-            // If the link starts with '#', it is explicitly relative to the `linkSourceScope` container.
-            ContainedList results = source->unit()->findContents(linkSourceScope->thisScope() + linkText.substr(1));
-            return (results.empty() ? nullptr : results.front());
-        }
-        else if (separatorPos != string::npos)
-        {
-            // If the link has a '#' anywhere else, convert it to '::' so we can look it up.
-            linkText.replace(separatorPos, 1, "::");
-        }
-        ContainedList results = linkSourceScope->lookupContained(linkText, false);
-        return (results.empty() ? nullptr : results.front());
-    }
-}
-
 optional<DocComment>
 Slice::DocComment::createUnparsed(const string& rawDocComment)
 {
-    // Split the comment's raw text up into lines.
-    StringList lines = splitComment(rawDocComment);
+    // Split the comment into separate lines, and remove any trailing whitespace from each line.
+    StringList lines;
+    string::size_type pos = 0;
+    string::size_type nextPos;
+    while ((nextPos = rawDocComment.find_first_of('\n', pos)) != string::npos)
+    {
+        lines.push_back(IceInternal::trim(rawDocComment.substr(pos, nextPos - pos)));
+        pos = nextPos + 1; // Skip the '\n' character.
+    }
+    lines.push_back(IceInternal::trim(rawDocComment.substr(pos)));
+
+    // Remove empty trailing lines.
+    while (!lines.empty() && lines.back().empty())
+    {
+        lines.pop_back();
+    }
+
     if (lines.empty())
     {
         return nullopt;
@@ -466,318 +357,6 @@ Slice::DocComment::createUnparsed(const string& rawDocComment)
         comment._rawDocCommentLines = std::move(lines);
         return comment;
     }
-}
-
-void
-Slice::DocComment::parse(const ContainedPtr& p, const DocLinkFormatter& linkFormatter)
-{
-    // TODO: this is a temporary hack since only "csharp" happens to set 'escapeXml'.
-    // If true, escapes all XML special characters in the parsed comment. Defaults to false.
-    const bool escapeXml = (p->unit()->languageName() == "cs");
-
-    // Split the comment's raw text up into lines.
-    StringList lines = _rawDocCommentLines;
-
-    // Escape any XML entities if necessary.
-    if (escapeXml)
-    {
-        const string amp = "&amp;";
-        const string lt = "&lt;";
-        const string gt = "&gt;";
-
-        for (auto& line : lines)
-        {
-            string::size_type pos = 0;
-            while ((pos = line.find_first_of("&<>", pos)) != string::npos)
-            {
-                switch (line[pos])
-                {
-                    case '&':
-                        line.replace(pos, 1, amp);
-                        pos += amp.size();
-                        break;
-                    case '<':
-                        line.replace(pos, 1, lt);
-                        pos += lt.size();
-                        break;
-                    case '>':
-                        line.replace(pos, 1, gt);
-                        pos += gt.size();
-                        break;
-                    default:
-                        assert(false);
-                        break;
-                }
-            }
-        }
-    }
-
-    // Fix any link tags using the provided link formatter.
-    const string link = "{@link ";
-    for (auto& line : lines)
-    {
-        auto pos = line.find(link);
-        while (pos != string::npos)
-        {
-            auto endpos = line.find('}', pos);
-            if (endpos != string::npos)
-            {
-                // Extract the linked-to identifier.
-                auto identStart = line.find_first_not_of(" \t", pos + link.size());
-                auto identEnd = line.find_last_not_of(" \t", endpos);
-                string linkText = line.substr(identStart, identEnd - identStart);
-
-                // Then erase the entire '{@link foo}' tag from the comment.
-                line.erase(pos, endpos - pos + 1);
-
-                // Attempt to resolve the link, and issue a warning if the link is invalid.
-                SyntaxTreeBasePtr linkTarget = resolveDocLink(linkText, p);
-                if (!linkTarget)
-                {
-                    string msg = "no Slice element with identifier '" + linkText + "' could be found in this context";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                }
-                if (dynamic_pointer_cast<Parameter>(linkTarget))
-                {
-                    // We don't support linking to parameters with '@link' tags.
-                    // Parameter links must be done with '@p' tags, and can only appear on the enclosing operation.
-                    string msg = "cannot link parameter '" + linkText + "'; parameters can only be referenced with @p";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                    linkTarget = nullptr;
-                }
-
-                // Finally, insert a correctly formatted link where the '{@link foo}' used to be.
-                string formattedLink = (*linkFormatter)(linkText, p, linkTarget);
-                line.insert(pos, formattedLink);
-                pos += formattedLink.length();
-            }
-            pos = line.find(link, pos);
-        }
-    }
-
-    // Some tags are only valid if they're applied to an operation.
-    // And we need a reference to the operation to make sure any names used in the tag match the names in the operation.
-    OperationPtr operationTarget = dynamic_pointer_cast<Operation>(p);
-
-    const string ws = " \t";
-    const string paramTag = "@param";
-    const string throwsTag = "@throws";
-    const string exceptionTag = "@exception";
-    const string remarkTag = "@remark";
-    const string remarksTag = "@remarks";
-    const string seeTag = "@see";
-    const string returnTag = "@return";
-    const string deprecatedTag = "@deprecated";
-
-    StringList* currentSection = &_overview;
-    string lineText;
-    string name;
-
-    // Parse the comment's text.
-    for (const auto& line : lines)
-    {
-        lineText.clear();
-
-        if (parseNamedCommentLine(line, paramTag, name, lineText))
-        {
-            if (!operationTarget)
-            {
-                // If '@param' was put on anything other than an operation, ignore it and issue a warning.
-                const string msg = "the '" + paramTag + "' tag is only valid on operations";
-                p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                currentSection = nullptr;
-            }
-            else
-            {
-                // Check that the '@param <name>' corresponds to an actual parameter in the operation.
-                const ParameterList params = operationTarget->parameters();
-                const auto paramNameCheck = [&name](const ParameterPtr& param) { return param->name() == name; };
-                if (std::none_of(params.begin(), params.end(), paramNameCheck))
-                {
-                    const string msg = "'" + paramTag + " " + name +
-                                       "' does not correspond to any parameter in operation '" + p->name() + "'";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                }
-
-                // Check if this is a duplicate tag. If it is, ignore it and issue a warning.
-                if (_parameters.count(name) != 0)
-                {
-                    const string msg = "ignoring duplicate doc-comment tag: '" + paramTag + " " + name + "'";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                    currentSection = nullptr;
-                }
-                else
-                {
-                    _parameters[name] = {};
-                    currentSection = &_parameters[name];
-                }
-            }
-        }
-        else if (
-            parseNamedCommentLine(line, throwsTag, name, lineText) ||
-            parseNamedCommentLine(line, exceptionTag, name, lineText))
-        {
-            // '@throws' and '@exception' are equivalent. But we want to use the correct one in our warning messages.
-            const string actualTag = (line.find(throwsTag) == 0) ? throwsTag : exceptionTag;
-            if (!operationTarget)
-            {
-                // If '@throws'/'@exception' was put on anything other than an operation, ignore it and issue a warning.
-                const string msg = "the '" + actualTag + "' tag is only valid on operations";
-                p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                currentSection = nullptr;
-            }
-            else
-            {
-                // Check if the exception exists...
-                const ExceptionPtr exceptionTarget = operationTarget->lookupException(name, false);
-                if (!exceptionTarget)
-                {
-                    const string msg = "'" + actualTag + " " + name +
-                                       "': no exception with this name could be found from the current scope";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                }
-                else
-                {
-                    // ... and matches one of the exceptions in the operation's specification.
-                    const ExceptionList exceptionSpec = operationTarget->throws();
-                    const auto exceptionCheck = [&exceptionTarget](const ExceptionPtr& ex)
-                    { return ex->scoped() == exceptionTarget->scoped(); };
-                    if (std::none_of(exceptionSpec.begin(), exceptionSpec.end(), exceptionCheck))
-                    {
-                        const string msg = "'" + actualTag + " " + name + "': this exception is not listed in the " +
-                                           "exception specification of '" + operationTarget->name() + "'";
-                        p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                    }
-
-                    // Check if this is a duplicate tag. If it is, ignore it and issue a warning.
-                    if (_exceptions.count(name) != 0)
-                    {
-                        const string msg = "ignoring duplicate doc-comment tag: '" + actualTag + " " + name + "'";
-                        p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                        currentSection = nullptr;
-                    }
-                    else
-                    {
-                        _exceptions[name] = {};
-                        currentSection = &_exceptions[name];
-                    }
-                }
-            }
-        }
-        else if (parseCommentLine(line, remarkTag, lineText) || parseCommentLine(line, remarksTag, lineText))
-        {
-            currentSection = &_remarks;
-        }
-        else if (parseCommentLine(line, seeTag, lineText))
-        {
-            currentSection = &_seeAlso;
-
-            // Remove any leading and trailing whitespace from the line.
-            // There's no concern of losing formatting for `@see` due to its simplicity.
-            lineText = IceInternal::trim(lineText);
-            if (lineText.empty())
-            {
-                const string msg = "missing link target after '" + seeTag + "' tag";
-                p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-            }
-            else if (lineText.back() == '.')
-            {
-                // '@see' tags aren't allowed to end with periods.
-                // They do not take sentences, and the trailing period will trip up some language's doc-comments.
-                const string msg = "ignoring trailing '.' character in '" + seeTag + "' tag";
-                p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                lineText.pop_back();
-            }
-        }
-        else if (parseCommentLine(line, returnTag, lineText))
-        {
-            if (!operationTarget)
-            {
-                // If '@return' was put on anything other than an operation, ignore it and issue a warning.
-                const string msg = "the '" + returnTag + "' tag is only valid on operations";
-                p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                currentSection = nullptr;
-            }
-            else
-            {
-                if (!operationTarget->returnType())
-                {
-                    // If '@return' was applied to a void operation (one without a return-type), issue a warning.
-                    const string msg = "'" + returnTag + "' is only valid on operations with non-void return types";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                }
-
-                // Check if this is a duplicate tag. If it is, ignore it and issue a warning.
-                if (!_returns.empty())
-                {
-                    const string msg = "ignoring duplicate doc-comment tag: '" + returnTag + "'";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                    currentSection = nullptr;
-                }
-                else
-                {
-                    currentSection = &_returns;
-                }
-            }
-        }
-        else if (parseCommentLine(line, deprecatedTag, lineText))
-        {
-            // Check if this is a duplicate tag (ie. multiple '@deprecated'). If it is, ignore it and issue a warning.
-            if (_isDeprecated)
-            {
-                const string msg = "ignoring duplicate doc-comment tag: '" + deprecatedTag + "'";
-                p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                currentSection = nullptr;
-            }
-            else
-            {
-                _isDeprecated = true;
-                currentSection = &_deprecated;
-            }
-        }
-        else // This line didn't introduce a new tag. Either we're in the overview or a tag whose content is multi-line.
-        {
-            if (!line.empty())
-            {
-                // We've encountered an unknown doc tag.
-                if (line[0] == '@')
-                {
-                    auto unknownTag = line.substr(0, line.find_first_of(" \t"));
-                    const string msg = "ignoring unknown doc tag '" + unknownTag + "' in comment";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                    currentSection = nullptr;
-                }
-
-                // '@see' tags are not allowed to span multiple lines.
-                if (currentSection == &_seeAlso)
-                {
-                    string msg = "'@see' tags cannot span multiple lines and must be of the form: '@see identifier'";
-                    p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
-                    currentSection = nullptr;
-                }
-            }
-
-            // Here we allow empty lines, since they could be used for formatting to separate lines.
-            if (currentSection)
-            {
-                currentSection->push_back(line);
-            }
-            continue;
-        }
-
-        // Reaching here means that this line introduced a new tag. We reject empty lines to handle comments which
-        // are formatted like: `@param myVeryCoolParam\nvery long explanation that\nspans multiple lines`.
-        // We don't want an empty line at the top just because the user's content didn't start until the next line.
-        if (currentSection && !lineText.empty())
-        {
-            currentSection->push_back(lineText);
-        }
-    }
-
-    trimLines(_overview);
-    trimLines(_remarks);
-    trimLines(_deprecated);
-    trimLines(_returns);
 }
 
 bool
@@ -1249,54 +828,63 @@ Slice::Container::destroyContents()
 ModulePtr
 Slice::Container::createModule(const string& name, bool nestedSyntax)
 {
-    ContainedList matches = unit()->findContents(thisScope() + name);
-    matches.sort(containedCompare); // Modules can occur many times...
-    matches.unique(containedEqual); // ... but we only want one instance of each.
+    ModulePtr q = make_shared<Module>(shared_from_this(), name, nestedSyntax);
 
-    if (thisScope() == "::")
+    if (!name.empty())
     {
-        unit()->addTopLevelModule(unit()->currentFile(), name);
-    }
-
-    for (const auto& p : matches)
-    {
-        bool differsOnlyInCase = matches.front()->name() != name;
-        ModulePtr module = dynamic_pointer_cast<Module>(p);
-        if (module)
+        if (thisScope() == "::")
         {
-            if (differsOnlyInCase) // Modules can be reopened only if they are capitalized correctly.
+            unit()->addTopLevelModule(unit()->currentFile(), name);
+        }
+
+        bool hasConflictingIdentifier = false;
+        ContainedList matches = unit()->findContents(thisScope() + name);
+        matches.sort(containedCompare); // Modules can occur many times...
+        matches.unique(containedEqual); // ... but we only want one instance of each.
+        for (const auto& p : matches)
+        {
+            bool differsOnlyInCase = matches.front()->name() != name;
+            if (ModulePtr module = dynamic_pointer_cast<Module>(p))
+            {
+                if (differsOnlyInCase) // Modules can be reopened only if they are capitalized correctly.
+                {
+                    ostringstream os;
+                    os << "module '" << name << "' is capitalized inconsistently with its previous name: '"
+                       << module->name() << "'";
+                    unit()->error(os.str());
+                    hasConflictingIdentifier = true;
+                    break;
+                }
+            }
+            else if (!differsOnlyInCase)
             {
                 ostringstream os;
-                os << "module '" << name << "' is capitalized inconsistently with its previous name: '"
-                   << module->name() << "'";
+                os << "redefinition of " << matches.front()->kindOf() << " '" << matches.front()->name()
+                   << "' as module";
                 unit()->error(os.str());
-                return nullptr;
+                hasConflictingIdentifier = true;
+                break;
+            }
+            else
+            {
+                ostringstream os;
+                os << "module '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
+                   << " name '" << matches.front()->name() << "'";
+                unit()->error(os.str());
+                hasConflictingIdentifier = true;
+                break;
             }
         }
-        else if (!differsOnlyInCase)
+        if (!hasConflictingIdentifier)
         {
-            ostringstream os;
-            os << "redefinition of " << matches.front()->kindOf() << " '" << matches.front()->name() << "' as module";
-            unit()->error(os.str());
-            return nullptr;
+            // If this module has a valid identifier and doesn't conflict with another definition,
+            // add it to the unit's contentMap so it can be looked up later.
+            unit()->addContent(q);
         }
-        else
-        {
-            ostringstream os;
-            os << "module '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
-               << " name '" << matches.front()->name() << "'";
-            unit()->error(os.str());
-            return nullptr;
-        }
+
+        reportIllegalSuffixOrUnderscore(name);
     }
 
-    if (!checkIdentifier(name))
-    {
-        return nullptr;
-    }
-
-    ModulePtr q = make_shared<Module>(shared_from_this(), name, nestedSyntax);
-    unit()->addContent(q);
     _contents.push_back(q);
     return q;
 }
@@ -1348,7 +936,7 @@ Slice::Container::createClassDef(const string& name, int32_t id, const ClassDefP
         return nullptr;
     }
 
-    if (!checkIdentifier(name) || !checkForGlobalDefinition("classes"))
+    if (!reportIllegalSuffixOrUnderscore(name) || !checkForGlobalDefinition("classes"))
     {
         return nullptr;
     }
@@ -1407,7 +995,7 @@ Slice::Container::createClassDecl(const string& name)
         return nullptr;
     }
 
-    if (!checkIdentifier(name) || !checkForGlobalDefinition("classes"))
+    if (!reportIllegalSuffixOrUnderscore(name) || !checkForGlobalDefinition("classes"))
     {
         return nullptr;
     }
@@ -1482,7 +1070,7 @@ Slice::Container::createInterfaceDef(const string& name, const InterfaceList& ba
         return nullptr;
     }
 
-    if (!checkIdentifier(name) || !checkForGlobalDefinition("interfaces"))
+    if (!reportIllegalSuffixOrUnderscore(name) || !checkForGlobalDefinition("interfaces"))
     {
         return nullptr;
     }
@@ -1543,7 +1131,7 @@ Slice::Container::createInterfaceDecl(const string& name)
         return nullptr;
     }
 
-    if (!checkIdentifier(name) || !checkForGlobalDefinition("interfaces"))
+    if (!reportIllegalSuffixOrUnderscore(name) || !checkForGlobalDefinition("interfaces"))
     {
         return nullptr;
     }
@@ -1590,7 +1178,7 @@ Slice::Container::createException(const string& name, const ExceptionPtr& base, 
         return nullptr;
     }
 
-    checkIdentifier(name); // Don't return here -- we create the exception anyway
+    reportIllegalSuffixOrUnderscore(name); // Don't return here -- we create the exception anyway
 
     if (nodeType == Real)
     {
@@ -1604,36 +1192,41 @@ Slice::Container::createException(const string& name, const ExceptionPtr& base, 
 }
 
 StructPtr
-Slice::Container::createStruct(const string& name, NodeType nodeType)
+Slice::Container::createStruct(const string& name)
 {
-    ContainedList matches = unit()->findContents(thisScope() + name);
-    if (!matches.empty())
+    StructPtr p = make_shared<Struct>(shared_from_this(), name);
+
+    checkForGlobalDefinition("structs");
+
+    if (!name.empty())
     {
-        if (matches.front()->name() == name)
+        ContainedList matches = unit()->findContents(thisScope() + name);
+        if (!matches.empty())
         {
-            ostringstream os;
-            os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as struct";
-            unit()->error(os.str());
+            if (matches.front()->name() == name)
+            {
+                ostringstream os;
+                os << "redefinition of " << matches.front()->kindOf() << " '" << name << "' as struct";
+                unit()->error(os.str());
+            }
+            else
+            {
+                ostringstream os;
+                os << "struct '" << name << "' differs only in capitalization from " << matches.front()->kindOf()
+                   << " '" << matches.front()->name() << "'";
+                unit()->error(os.str());
+            }
         }
         else
         {
-            ostringstream os;
-            os << "struct '" << name << "' differs only in capitalization from " << matches.front()->kindOf() << " '"
-               << matches.front()->name() << "'";
-            unit()->error(os.str());
+            // If this definition has a valid identifier and doesn't conflict with another definition,
+            // add it to the unit's contentMap so it can be looked up later.
+            unit()->addContent(p);
         }
-        return nullptr;
+
+        reportIllegalSuffixOrUnderscore(name);
     }
 
-    checkIdentifier(name); // Don't return here -- we create the struct anyway.
-
-    if (nodeType == Real)
-    {
-        checkForGlobalDefinition("structs"); // Don't return here -- we create the struct anyway.
-    }
-
-    StructPtr p = make_shared<Struct>(shared_from_this(), name);
-    unit()->addContent(p);
     _contents.push_back(p);
     return p;
 }
@@ -1642,7 +1235,6 @@ SequencePtr
 Slice::Container::createSequence(const string& name, const TypePtr& type, MetadataList metadata)
 {
     SequencePtr p = make_shared<Sequence>(shared_from_this(), name, type, std::move(metadata));
-    _contents.push_back(p);
 
     checkForGlobalDefinition("sequences");
 
@@ -1672,9 +1264,10 @@ Slice::Container::createSequence(const string& name, const TypePtr& type, Metada
             unit()->addContent(p);
         }
 
-        checkIdentifier(name);
+        reportIllegalSuffixOrUnderscore(name);
     }
 
+    _contents.push_back(p);
     return p;
 }
 
@@ -1693,7 +1286,6 @@ Slice::Container::createDictionary(
         std::move(keyMetadata),
         valueType,
         std::move(valueMetadata));
-    _contents.push_back(p);
 
     checkForGlobalDefinition("dictionaries");
     if (keyType && !Dictionary::isLegalKeyType(keyType))
@@ -1727,9 +1319,10 @@ Slice::Container::createDictionary(
             unit()->addContent(p);
         }
 
-        checkIdentifier(name);
+        reportIllegalSuffixOrUnderscore(name);
     }
 
+    _contents.push_back(p);
     return p;
 }
 
@@ -1737,7 +1330,6 @@ EnumPtr
 Slice::Container::createEnum(const string& name)
 {
     EnumPtr p = make_shared<Enum>(shared_from_this(), name);
-    _contents.push_back(p);
 
     checkForGlobalDefinition("enums");
 
@@ -1767,9 +1359,10 @@ Slice::Container::createEnum(const string& name)
             unit()->addContent(p);
         }
 
-        checkIdentifier(name);
+        reportIllegalSuffixOrUnderscore(name);
     }
 
+    _contents.push_back(p);
     return p;
 }
 
@@ -1785,7 +1378,6 @@ Slice::Container::createConst(
     validateConstant(name, type, resolvedValueType, valueString, true);
     ConstPtr p =
         make_shared<Const>(shared_from_this(), name, type, std::move(metadata), resolvedValueType, valueString);
-    _contents.push_back(p);
 
     checkForGlobalDefinition("constants");
 
@@ -1815,9 +1407,10 @@ Slice::Container::createConst(
             unit()->addContent(p);
         }
 
-        checkIdentifier(name);
+        reportIllegalSuffixOrUnderscore(name);
     }
 
+    _contents.push_back(p);
     return p;
 }
 
@@ -2271,19 +1864,29 @@ Slice::Container::checkHasChangedMeaning(const string& name, ContainedPtr namedT
     }
     else
     {
-        // We've previously introduced the first component to the current scope, check that it has not changed meaning.
-        if (it->second->scoped() != namedThing->scoped())
+        // If both identifiers resolve to the exact same element, then their meaning didn't change.
+        if (it->second->scoped() == namedThing->scoped())
         {
-            // We don't want to issue errors for data-members or parameters.
-            // Since they can only exist within a self-contained scope, the only way for them to "change meaning"
-            // is to be redefined, which we already emit an error for elsewhere (see doesNameConflict).
-            auto isInSelfContainedScope = [](const ContainedPtr& p)
-            { return dynamic_pointer_cast<DataMember>(p) || dynamic_pointer_cast<Parameter>(p); };
+            return;
+        }
 
-            if (!isInSelfContainedScope(it->second) && !isInSelfContainedScope(namedThing))
-            {
-                unit()->error("'" + firstComponent + "' has changed meaning");
-            }
+        // If the two identifiers resolve to different elements, but those elements are in the same container,
+        // then the 'real' error is that the user redefined an element, not that an element changed meaning.
+        // This error is reported elsewhere in the code, so nothing to do here.
+        if (it->second->container() == namedThing->container())
+        {
+            return;
+        }
+
+        // We don't want to issue errors for data-members or parameters.
+        // These elements always exist within a self-contained scope, the only way for them to "change meaning"
+        // is to be redefined, which we already emit an error for elsewhere (see doesNameConflict).
+        auto isInSelfContainedScope = [](const ContainedPtr& p)
+        { return dynamic_pointer_cast<DataMember>(p) || dynamic_pointer_cast<Parameter>(p); };
+
+        if (!isInSelfContainedScope(it->second) && !isInSelfContainedScope(namedThing))
+        {
+            unit()->error("'" + firstComponent + "' has changed meaning");
         }
     }
 }
@@ -2658,7 +2261,7 @@ Slice::ClassDef::createDataMember(
         return nullptr;
     }
 
-    checkIdentifier(name); // Don't return here -- we create the data member anyway.
+    reportIllegalSuffixOrUnderscore(name); // Don't return here -- we create the data member anyway.
 
     //
     // Check whether any bases have defined something with the same name already.
@@ -3106,53 +2709,57 @@ Slice::InterfaceDef::createOperation(
     int32_t tag,
     Operation::Mode mode)
 {
-    if (doesNameConflict(name, "operation", _contents))
-    {
-        return nullptr;
-    }
-
-    // Check whether enclosing interface has the same name.
-    if (name == this->name())
-    {
-        ostringstream os;
-        os << "interface name '" << name << "' cannot be used as operation name";
-        unit()->error(os.str());
-        return nullptr;
-    }
-
-    string newName = IceInternal::toLower(name);
-    string thisName = IceInternal::toLower(this->name());
-    if (newName == thisName)
-    {
-        ostringstream os;
-        os << "operation '" << name << "' differs only in capitalization from enclosing interface name '"
-           << this->name() << "'";
-        unit()->error(os.str());
-        return nullptr;
-    }
-
-    // Check whether any base has an operation with the same name already
-    for (const auto& baseInterface : _bases)
-    {
-        vector<string> baseNames;
-        for (const auto& op : baseInterface->allOperations())
-        {
-            baseNames.push_back(op->name());
-        }
-        if (!checkBaseOperationNames(name, baseNames))
-        {
-            return nullptr;
-        }
-    }
-
-    // Check the operations of the Object pseudo-interface.
-    if (!checkBaseOperationNames(name, {"ice_id", "ice_ids", "ice_ping", "ice_isA"}))
-    {
-        return nullptr;
-    }
-
     OperationPtr op = make_shared<Operation>(shared_from_this(), name, returnType, isOptional, tag, mode);
-    unit()->addContent(op);
+
+    if (!name.empty())
+    {
+        bool hasConflictingIdentifier = doesNameConflict(name, "operation", _contents);
+
+        // Check whether enclosing interface has the same name.
+        if (name == this->name())
+        {
+            ostringstream os;
+            os << "interface name '" << name << "' cannot be used as operation name";
+            unit()->error(os.str());
+            hasConflictingIdentifier = true;
+        }
+        else if (IceInternal::toLower(name) == IceInternal::toLower(this->name()))
+        {
+            ostringstream os;
+            os << "operation '" << name << "' differs only in capitalization from enclosing interface name '"
+               << this->name() << "'";
+            unit()->error(os.str());
+            hasConflictingIdentifier = true;
+        }
+
+        // Check whether any base has an operation with the same name already
+        for (const auto& baseInterface : _bases)
+        {
+            vector<string> baseNames;
+            for (const auto& baseOp : baseInterface->allOperations())
+            {
+                baseNames.push_back(baseOp->name());
+            }
+            if (!checkBaseOperationNames(name, baseNames))
+            {
+                hasConflictingIdentifier = true;
+                break;
+            }
+        }
+        // Check the operations of the Object pseudo-interface.
+        if (!checkBaseOperationNames(name, {"ice_id", "ice_ids", "ice_ping", "ice_isA"}))
+        {
+            hasConflictingIdentifier = true;
+        }
+
+        if (!hasConflictingIdentifier)
+        {
+            // If this operation has a valid identifier and doesn't conflict with another definition,
+            // add it to the unit's contentMap so it can be looked up later.
+            unit()->addContent(op);
+        }
+    }
+
     _contents.push_back(op);
     return op;
 }
@@ -3377,7 +2984,7 @@ Slice::Operation::createParameter(const string& name, const TypePtr& type, bool 
         return nullptr;
     }
 
-    checkIdentifier(name); // Don't return here -- we create the parameter anyway.
+    reportIllegalSuffixOrUnderscore(name); // Don't return here -- we create the parameter anyway.
 
     if (isOptional)
     {
@@ -3761,7 +3368,7 @@ Slice::Exception::createDataMember(
         return nullptr;
     }
 
-    checkIdentifier(name); // Don't return here -- we create the data member anyway.
+    reportIllegalSuffixOrUnderscore(name); // Don't return here -- we create the data member anyway.
 
     // Check whether any bases have defined a member with the same name already.
     for (const auto& q : allBases())
@@ -3978,7 +3585,7 @@ Slice::Struct::createDataMember(
         return nullptr;
     }
 
-    checkIdentifier(name); // Don't return here -- we create the data member anyway.
+    reportIllegalSuffixOrUnderscore(name); // Don't return here -- we create the data member anyway.
 
     // Structures cannot contain themselves.
     if (type && type.get() == this)
@@ -4333,7 +3940,7 @@ Slice::Enum::createEnumerator(const string& name, optional<int32_t> explicitValu
 {
     // Validate the enumerator's name.
     doesNameConflict(name, "enumerator", _contents); // Ignore return value.
-    checkIdentifier(name);                           // Ignore return value.
+    reportIllegalSuffixOrUnderscore(name);           // Ignore return value.
 
     // Determine the enumerator's value, and check that it's valid.
     int32_t nextValue;
