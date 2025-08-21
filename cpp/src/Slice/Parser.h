@@ -19,12 +19,6 @@
 
 namespace Slice
 {
-    enum NodeType
-    {
-        Dummy,
-        Real
-    };
-
     //
     // Format to use when marshaling a class instance.
     //
@@ -256,19 +250,6 @@ namespace Slice
     // DocComment
     // ----------------------------------------------------------------------
 
-    /// Functions of this type are used to map link tags into each language's link syntax.
-    /// In Slice, links are of the form: '{@link <rawLink>}'.
-    ///
-    /// The first argument (`rawLink`) is the raw link text, taken verbatim from the doc-comment.
-    /// The second argument (`source`) is a pointer to the Slice element that the doc comment (and link) are written on.
-    /// The third argument (`target`) is a pointer to the Slice element that is being linked to.
-    /// If the parser could not resolve the link, this will be `nullptr`.
-    ///
-    /// This function should return the fully formatted link, which will replace the entire '{@link <rawLink>}'
-    /// in a raw doc-comment.
-    using DocLinkFormatter =
-        std::string (*)(const std::string& rawLink, const ContainedPtr& source, const SyntaxTreeBasePtr& target);
-
     class DocCommentParser;
 
     class DocComment final
@@ -479,8 +460,7 @@ namespace Slice
         [[nodiscard]] ClassDeclPtr createClassDecl(const std::string& name);
         [[nodiscard]] InterfaceDefPtr createInterfaceDef(const std::string& name, const InterfaceList& bases);
         [[nodiscard]] InterfaceDeclPtr createInterfaceDecl(const std::string& name);
-        [[nodiscard]] ExceptionPtr
-        createException(const std::string& name, const ExceptionPtr& base, NodeType nodeType = Real);
+        [[nodiscard]] ExceptionPtr createException(const std::string& name, const ExceptionPtr& base);
         [[nodiscard]] StructPtr createStruct(const std::string& name);
         [[nodiscard]] SequencePtr createSequence(const std::string& name, const TypePtr& type, MetadataList metadata);
         [[nodiscard]] DictionaryPtr createDictionary(
@@ -618,7 +598,7 @@ namespace Slice
     public:
         ClassDef(const ContainerPtr& container, const std::string& name, std::int32_t id, ClassDefPtr base);
         void destroy() final;
-        DataMemberPtr createDataMember(
+        [[nodiscard]] DataMemberPtr createDataMember(
             const std::string& name,
             const TypePtr& type,
             bool isOptional,
@@ -837,7 +817,7 @@ namespace Slice
     public:
         Exception(const ContainerPtr& container, const std::string& name, ExceptionPtr base);
         void destroy() final;
-        DataMemberPtr createDataMember(
+        [[nodiscard]] DataMemberPtr createDataMember(
             const std::string& name,
             const TypePtr& type,
             bool isOptional,
@@ -867,11 +847,9 @@ namespace Slice
     {
     public:
         Struct(const ContainerPtr& container, const std::string& name);
-        DataMemberPtr createDataMember(
+        [[nodiscard]] DataMemberPtr createDataMember(
             const std::string& name,
             const TypePtr& type,
-            bool isOptional,
-            std::int32_t tag,
             SyntaxTreeBasePtr defaultValueType,
             std::optional<std::string> defaultValueString);
         [[nodiscard]] DataMemberList dataMembers() const;
