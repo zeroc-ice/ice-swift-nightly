@@ -9,7 +9,6 @@
 [["cpp:source-include:Ice/Process.h"]]
 
 [["js:module:@zeroc/ice"]]
-[["python:pkgdir:Ice"]]
 
 #include "Locator.ice"
 
@@ -69,9 +68,9 @@ module Ice
 
         /// Registers a proxy to the {@link Process} object of a server application.
         /// @param id The server ID.
-        /// @param proxy A proxy to the Process object of the server. This proxy is never null.
-        /// @throws ServerNotFoundException Thrown when the locator does not know a server application with this server
-        /// ID.
+        /// @param proxy A proxy to the {@link Process} object of the server. This proxy is never null.
+        /// @throws ServerNotFoundException Thrown when the locator does not know a server application with a server ID
+        /// of @p id.
         ["amd"] idempotent void setServerProcessProxy(string id, Process* proxy)
             throws ServerNotFoundException;
     }

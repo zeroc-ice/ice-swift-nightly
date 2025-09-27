@@ -9,7 +9,6 @@
 [["cpp:include:IceGrid/Config.h"]]
 
 [["js:module:@zeroc/ice"]]
-[["python:pkgdir:IceGrid"]]
 
 #include "Ice/BuiltinSequences.ice"
 #include "Ice/Identity.ice"
@@ -41,7 +40,7 @@ module IceGrid
         string reason;
     }
 
-    /// The exception that is thrown when a server failed to start.
+    /// The exception that is thrown when a server failed to stop.
     exception ServerStopException
     {
         /// The server ID.

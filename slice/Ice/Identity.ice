@@ -14,9 +14,8 @@
 [["cpp:include:vector"]]
 
 [["js:module:@zeroc/ice"]]
-[["python:pkgdir:Ice"]]
 
-/// Full-featured RPC framework.
+/// The Ice RPC framework.
 ["java:identifier:com.zeroc.Ice"]
 module Ice
 {

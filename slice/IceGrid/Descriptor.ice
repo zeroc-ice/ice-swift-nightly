@@ -9,7 +9,6 @@
 [["cpp:include:IceGrid/Config.h"]]
 
 [["js:module:@zeroc/ice"]]
-[["python:pkgdir:IceGrid"]]
 
 #include "Ice/BuiltinSequences.ice"
 #include "Ice/Identity.ice"
@@ -30,7 +29,7 @@ module IceGrid
         string value;
     }
 
-    /// A sequence of PropertyDescriptor.
+    /// A sequence of {@link PropertyDescriptor}.
     ["java:type:java.util.LinkedList<PropertyDescriptor>"]
     sequence<PropertyDescriptor> PropertyDescriptorSeq;
 
@@ -62,7 +61,7 @@ module IceGrid
         string proxyOptions;
     }
 
-    /// A sequence of ObjectDescriptor.
+    /// A sequence of {@link ObjectDescriptor}.
     ["java:type:java.util.LinkedList<ObjectDescriptor>"]
     sequence<ObjectDescriptor> ObjectDescriptorSeq;
 
@@ -85,7 +84,8 @@ module IceGrid
         string priority;
 
         /// When `true`, the object adapter registers a process object.
-        bool registerProcess;
+        ["deprecated:This field is provided for schema compatibility. It is no longer used."]
+        bool registerProcess = false;
 
         /// When `true`, the lifetime of this object adapter is the same of the server lifetime. This information is
         /// used by the IceGrid node to figure out the server state: the server is active when all its "server lifetime"
@@ -99,9 +99,31 @@ module IceGrid
         ObjectDescriptorSeq allocatables;
     }
 
-    /// A sequence of AdapterDescriptor.
+    /// A sequence of {@link AdapterDescriptor}.
     ["java:type:java.util.LinkedList<AdapterDescriptor>"]
     sequence<AdapterDescriptor> AdapterDescriptorSeq;
+
+    /// A Freeze database environment descriptor (deprecated, no longer used).
+    ["deprecated:This descriptor is provided for schema compatibility. It is no longer used."]
+    struct DbEnvDescriptor
+    {
+        /// The name of the database environment.
+        string name;
+
+        /// The description of this database environment.
+        string description;
+
+        /// The home of the database environment.
+        string dbHome;
+
+        /// The configuration properties of the database environment.
+        ["matlab:identifier:propertyDescriptors"]
+        PropertyDescriptorSeq properties;
+    }
+
+    /// A sequence of {@link DbEnvDescriptor}.
+    ["deprecated:This descriptor is provided for schema compatibility. It is no longer used."]
+    sequence<DbEnvDescriptor> DbEnvDescriptorSeq;
 
     /// Describes an Ice communicator.
     class CommunicatorDescriptor
@@ -112,6 +134,10 @@ module IceGrid
         /// The property set.
         PropertySetDescriptor propertySet;
 
+        /// The database environments.
+        ["deprecated"]
+        DbEnvDescriptorSeq dbEnvs;
+
         /// The path of each log file.
         Ice::StringSeq logs;
 
@@ -120,7 +146,7 @@ module IceGrid
     }
 
     /// Describes a distribution.
-    ["deprecated:This descriptor is provided for schema compatibility. It is no longer used as of Ice 3.8."]
+    ["deprecated:This descriptor is provided for schema compatibility. It is no longer used."]
     struct DistributionDescriptor
     {
         /// The proxy of the IcePatch2 server.
@@ -142,7 +168,7 @@ module IceGrid
 
         /// The Ice version used by this server. This is only required if backward compatibility with servers using old
         /// Ice versions is needed (otherwise the registry assumes the server is using the same Ice version as the
-        /// registry itself). For example "3.7.5".
+        /// registry itself). For example `"3.7.5"`.
         string iceVersion;
 
         /// The path to the server working directory.
@@ -156,7 +182,7 @@ module IceGrid
         ["java:type:java.util.LinkedList<String>"]
         Ice::StringSeq envs;
 
-        //// The server activation mode. Possible values are "on-demand" and "manual".
+        /// The server activation mode. Possible values are `"on-demand"` and `"manual"`.
         string activation;
 
         /// The activation timeout. It's an integer (in string format) that represents the number of seconds to wait for
@@ -182,7 +208,7 @@ module IceGrid
         string user;
     }
 
-    /// A sequence of ServerDescriptor.
+    /// A sequence of {@link ServerDescriptor}.
     ["java:type:java.util.LinkedList<ServerDescriptor>"]
     sequence<ServerDescriptor> ServerDescriptorSeq;
 
@@ -196,7 +222,7 @@ module IceGrid
         string entry;
     }
 
-    /// A sequence of ServiceDescriptor.
+    /// A sequence of {@link ServiceDescriptor}.
     ["java:type:java.util.LinkedList<ServiceDescriptor>"]
     sequence<ServiceDescriptor> ServiceDescriptorSeq;
 
@@ -213,12 +239,12 @@ module IceGrid
         /// The property set.
         PropertySetDescriptor propertySet;
 
-        /// The services property sets. It's only valid to set these property sets when the template is an IceBox server
-        /// template.
+        /// The services property sets.
+        /// It's only valid to set these property sets when the template is an IceBox server template.
         PropertySetDescriptorDict servicePropertySets;
     }
 
-    /// A sequence of ServerInstanceDescriptor.
+    /// A sequence of {@link ServerInstanceDescriptor}.
     ["java:type:java.util.LinkedList<ServerInstanceDescriptor>"]
     sequence<ServerInstanceDescriptor> ServerInstanceDescriptorSeq;
 
@@ -232,7 +258,7 @@ module IceGrid
         ["java:type:java.util.LinkedList<String>"]
         Ice::StringSeq parameters;
 
-        /// The parameters default values.
+        /// The parameters' default values.
         StringStringDict parameterDefaults;
     }
 
@@ -256,7 +282,7 @@ module IceGrid
         PropertySetDescriptor propertySet;
     }
 
-    /// A sequence of ServiceInstanceDescriptor.
+    /// A sequence of {@link ServiceInstanceDescriptor}.
     ["java:type:java.util.LinkedList<ServiceInstanceDescriptor>"]
     sequence<ServiceInstanceDescriptor> ServiceInstanceDescriptorSeq;
 
@@ -345,7 +371,7 @@ module IceGrid
         string filter;
     }
 
-    /// A sequence of ReplicaGroupDescriptor.
+    /// A sequence of {@link ReplicaGroupDescriptor}.
     ["java:type:java.util.LinkedList<ReplicaGroupDescriptor>"]
     sequence<ReplicaGroupDescriptor> ReplicaGroupDescriptorSeq;
 
@@ -382,7 +408,7 @@ module IceGrid
         PropertySetDescriptorDict propertySets;
     }
 
-    /// A sequence of ApplicationDescriptor.
+    /// A sequence of {@link ApplicationDescriptor}.
     ["java:type:java.util.LinkedList<ApplicationDescriptor>"]
     sequence<ApplicationDescriptor> ApplicationDescriptorSeq;
 
@@ -428,7 +454,7 @@ module IceGrid
         BoxedString loadFactor;
     }
 
-    /// A sequence of NodeUpdateDescriptor.
+    /// A sequence of {@link NodeUpdateDescriptor}.
     ["java:type:java.util.LinkedList<NodeUpdateDescriptor>"]
     sequence<NodeUpdateDescriptor> NodeUpdateDescriptorSeq;
 
@@ -446,10 +472,11 @@ module IceGrid
         /// The name of the application to update.
         string name;
 
-        /// The updated description (or null if the description wasn't updated.)
+        /// The updated description (or null if the description wasn't updated).
         BoxedString description;
 
         /// The updated distribution application descriptor.
+        ["deprecated"]
         BoxedDistributionDescriptor distrib;
 
         /// The variables to update.

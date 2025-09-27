@@ -14,7 +14,6 @@
 [["cpp:include:ostream"]]
 
 [["js:module:@zeroc/ice"]]
-[["python:pkgdir:Ice"]]
 
 ["java:identifier:com.zeroc.Ice"]
 module Ice
@@ -30,15 +29,15 @@ module Ice
         byte minor;
     }
 
-    /// Represents a version of the Ice encoding. Ice supports version 1.0 and 1.1 of this encoding.
-    /// @remark The Ice encoding is also known as the Slice encoding.
+    /// Represents a version of the Slice encoding. Ice supports version 1.0 and 1.1 of this encoding.
+    /// @remark The Slice encoding is also known as the Ice encoding.
     ["cpp:custom-print"]
     struct EncodingVersion
     {
-        /// The major version of the Ice encoding.
+        /// The major version of the Slice encoding.
         byte major;
 
-        /// The minor version of the Ice encoding.
+        /// The minor version of the Slice encoding.
         byte minor;
     }
 }
