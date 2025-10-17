@@ -8,6 +8,7 @@
 #include "Ice/Ice.h"
 #include "Instrumentation.h"
 
+#include <functional>
 #include <set>
 
 namespace Glacier2
@@ -54,7 +55,7 @@ namespace Glacier2
         std::shared_ptr<FilterManager> _filterManager;
     };
 
-    class SessionRouterI final : public Router,
+    class SessionRouterI final : public AsyncRouter,
                                  public Glacier2::Instrumentation::ObserverUpdater,
                                  public std::enable_shared_from_this<SessionRouterI>
     {
@@ -68,24 +69,65 @@ namespace Glacier2
         ~SessionRouterI() final;
         void destroy();
 
-        std::optional<Ice::ObjectPrx> getClientProxy(std::optional<bool>&, const Ice::Current&) const final;
-        [[nodiscard]] std::optional<Ice::ObjectPrx> getServerProxy(const Ice::Current&) const final;
-        Ice::ObjectProxySeq addProxies(Ice::ObjectProxySeq, const Ice::Current&) final;
-        [[nodiscard]] std::string getCategoryForClient(const Ice::Current&) const final;
+        void getClientProxyAsync(
+            std::function<void(const std::optional<Ice::ObjectPrx>& returnValue, std::optional<bool> hasRoutingTable)>
+                response,
+            std::function<void(std::exception_ptr)> exception,
+            const Ice::Current&) const final;
+
+        void getServerProxyAsync(
+            std::function<void(const std::optional<Ice::ObjectPrx>& returnValue)> response,
+            std::function<void(std::exception_ptr)> exception,
+            const Ice::Current&) const final;
+
+        void addProxiesAsync(
+            Ice::ObjectProxySeq,
+            std::function<void(const Ice::ObjectProxySeq&)> response,
+            std::function<void(std::exception_ptr)> exception,
+            const Ice::Current&) final;
+
+        void getCategoryForClientAsync(
+            std::function<void(std::string_view)> response,
+            std::function<void(std::exception_ptr)> exception,
+            const Ice::Current&) const final;
+
         void createSessionAsync(
             std::string,
             std::string,
             std::function<void(const std::optional<SessionPrx>&)>,
             std::function<void(std::exception_ptr)>,
             const Ice::Current&) final;
+
         void createSessionFromSecureConnectionAsync(
             std::function<void(const std::optional<SessionPrx>&)>,
             std::function<void(std::exception_ptr)>,
             const Ice::Current&) final;
-        void refreshSession(const Ice::Current&) final {}
-        void destroySession(const Ice::Current&) final;
-        [[nodiscard]] std::int64_t getSessionTimeout(const Ice::Current&) const final;
-        [[nodiscard]] int getACMTimeout(const Ice::Current&) const final;
+
+        void refreshSessionAsync(
+            std::function<void()> response,
+            std::function<void(std::exception_ptr)>,
+            const Ice::Current&) final
+        {
+            response();
+        }
+
+        void destroySessionAsync(
+            std::function<void()> response,
+            std::function<void(std::exception_ptr)> exception,
+            const Ice::Current&) final;
+
+        void getSessionTimeoutAsync(
+            std::function<void(std::int64_t)> response,
+            std::function<void(std::exception_ptr)> exception,
+            const Ice::Current&) const final;
+
+        void getACMTimeoutAsync(
+            std::function<void(std::int32_t)> response,
+            std::function<void(std::exception_ptr)> exception,
+            const Ice::Current&) const final;
+
+        std::int64_t getSessionTimeout() const;
+        std::int32_t getACMTimeout() const;
 
         void updateSessionObservers() final;
 
@@ -95,15 +137,22 @@ namespace Glacier2
         [[nodiscard]] Ice::ObjectPtr getClientBlobject(const Ice::ConnectionPtr&, const Ice::Identity&) const;
         [[nodiscard]] Ice::ObjectPtr getServerBlobject(const std::string&) const;
 
-        void destroySession(const Ice::ConnectionPtr&);
+        /// Destroys the Glacier2 internal session.
+        /// @param connection The client->Glacier2 router connection that identifies the session to destroy.
+        /// @param error A callback that the implementation calls when the destruction of the application-provided
+        /// session fails (see SessionManager).
+        void destroySession(const Ice::ConnectionPtr& connection, std::function<void(std::exception_ptr)> error);
 
         [[nodiscard]] int sessionTraceLevel() const { return _sessionTraceLevel; }
 
+        /// Provides the default handling of exceptions thrown by the destruction of application-provided sessions.
+        [[nodiscard]] std::function<void(std::exception_ptr)> defaultSessionDestroyExceptionHandler() const;
+
     private:
+        void sessionDestroyException(std::exception_ptr) const;
+
         [[nodiscard]] std::shared_ptr<RouterI>
         getRouterImpl(const Ice::ConnectionPtr&, const Ice::Identity&, bool) const;
-
-        void sessionDestroyException(std::exception_ptr);
 
         bool startCreateSession(const std::shared_ptr<CreateSession>&, const Ice::ConnectionPtr&);
         void finishCreateSession(const Ice::ConnectionPtr&, const std::shared_ptr<RouterI>&);
