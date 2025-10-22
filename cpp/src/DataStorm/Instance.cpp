@@ -14,7 +14,10 @@ using namespace std;
 using namespace DataStormI;
 using namespace Ice;
 
-Instance::Instance(CommunicatorPtr communicator, function<void(function<void()> call)> customExecutor)
+Instance::Instance(
+    CommunicatorPtr communicator,
+    function<void(function<void()> call)> customExecutor,
+    std::optional<Ice::SSL::ServerAuthenticationOptions> serverAuthenticationOptions)
     : _communicator(std::move(communicator))
 {
     if (_communicator->getDefaultObjectAdapter())
@@ -31,11 +34,14 @@ Instance::Instance(CommunicatorPtr communicator, function<void(function<void()> 
         {
             properties->setProperty("DataStorm.Node.Server.Endpoints", "tcp");
         }
-        properties->setProperty("DataStorm.Node.Server.ThreadPool.SizeMax", "1");
+        // Use a serialized thread pool to ensure that samples are processed in the order they are received. This is
+        // especially important for PartialUpdate samples which depend on the order to compute the value.
+        properties->setProperty("DataStorm.Node.Server.ThreadPool.Serialize", "1");
 
         try
         {
-            _adapter = _communicator->createObjectAdapter("DataStorm.Node.Server");
+            _adapter =
+                _communicator->createObjectAdapter("DataStorm.Node.Server", std::move(serverAuthenticationOptions));
         }
         catch (const LocalException& ex)
         {
@@ -61,7 +67,6 @@ Instance::Instance(CommunicatorPtr communicator, function<void(function<void()> 
             // address.
             properties->setProperty("DataStorm.Node.Multicast.PublishedHost", "239.255.0.1");
         }
-        properties->setProperty("DataStorm.Node.Multicast.ThreadPool.SizeMax", "1");
 
         try
         {
