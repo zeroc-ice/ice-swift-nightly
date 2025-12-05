@@ -99,13 +99,13 @@ yyerror(const char* s)
 %token ICEGRID_STRING
 %token ICEGRID_START
 %token ICEGRID_STOP
+%token ICEGRID_STATUS
 %token ICEGRID_SIGNAL
 %token ICEGRID_STDOUT
 %token ICEGRID_STDERR
 %token ICEGRID_DESCRIBE
 %token ICEGRID_PROPERTIES
 %token ICEGRID_PROPERTY
-%token ICEGRID_STATE
 %token ICEGRID_PID
 %token ICEGRID_ENDPOINTS
 %token ICEGRID_ACTIVATION
@@ -398,13 +398,13 @@ command
 {
     parser->usage("server", "stderr");
 }
-| ICEGRID_SERVER ICEGRID_STATE strings ';'
+| ICEGRID_SERVER ICEGRID_STATUS strings ';'
 {
-    parser->stateServer($3);
+    parser->statusServer($3);
 }
-| ICEGRID_SERVER ICEGRID_STATE ICEGRID_HELP ';'
+| ICEGRID_SERVER ICEGRID_STATUS ICEGRID_HELP ';'
 {
-    parser->usage("server", "start");
+    parser->usage("server", "status");
 }
 | ICEGRID_SERVER ICEGRID_PID strings ';'
 {
@@ -477,6 +477,14 @@ command
 | ICEGRID_SERVICE ICEGRID_STOP ICEGRID_HELP ';'
 {
     parser->usage("service", "stop");
+}
+| ICEGRID_SERVICE ICEGRID_STATUS strings ';'
+{
+    parser->statusService($3);
+}
+| ICEGRID_SERVICE ICEGRID_STATUS ICEGRID_HELP ';'
+{
+    parser->usage("service", "status");
 }
 | ICEGRID_SERVICE ICEGRID_DESCRIBE strings ';'
 {
@@ -739,13 +747,13 @@ keyword
 | ICEGRID_STOP
 {
 }
+| ICEGRID_STATUS
+{
+}
 | ICEGRID_SIGNAL
 {
 }
 | ICEGRID_DESCRIBE
-{
-}
-| ICEGRID_STATE
 {
 }
 | ICEGRID_PID

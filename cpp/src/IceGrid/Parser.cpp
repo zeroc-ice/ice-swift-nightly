@@ -103,7 +103,7 @@ namespace
         {"server", "describe", "server describe ID        Describe server ID.\n"},
         {"server", "properties", "server properties ID      Get the run-time properties of server ID.\n"},
         {"server", "property", "server property ID NAME   Get the run-time property NAME of server ID.\n"},
-        {"server", "state", "server state ID           Get the state of server ID.\n"},
+        {"server", "status", "server status ID           Get the status of server ID.\n"},
         {"server", "pid", "server pid ID             Get the process id of server ID.\n"},
         {"server", "start", "server start ID           Start server ID.\n"},
         {"server", "stop", "server stop ID            Stop server ID.\n"},
@@ -125,6 +125,7 @@ namespace
          "                          started on demand or administratively).\n"},
         {"service", "start", "service start ID NAME     Starts service NAME in IceBox server ID.\n"},
         {"service", "stop", "service stop ID NAME      Stops service NAME in IceBox server ID.\n"},
+        {"service", "status", "service status ID NAME    Gets the status of service NAME in IceBox server ID.\n"},
         {"service", "describe", "service describe ID NAME  Describes service NAME in IceBox server ID.\n"},
         {"service",
          "properties",
@@ -1321,11 +1322,11 @@ Parser::describeServer(const list<string>& args)
 }
 
 void
-Parser::stateServer(const list<string>& args)
+Parser::statusServer(const list<string>& args)
 {
     if (args.size() != 1)
     {
-        invalidCommand("server state", "requires exactly one argument");
+        invalidCommand("server status", "requires exactly one argument");
         return;
     }
 
@@ -1562,6 +1563,42 @@ Parser::stopService(const list<string>& args)
     catch (const IceBox::AlreadyStoppedException&)
     {
         error("the service '" + service + "' is already stopped");
+    }
+    catch (const IceBox::NoSuchServiceException&)
+    {
+        error("couldn't find service '" + service + "'");
+    }
+    catch (const Ice::ObjectNotExistException&)
+    {
+        error("couldn't reach the server's Admin object");
+    }
+    catch (const Ice::FacetNotExistException&)
+    {
+        error("the server's Admin object does not provide a 'IceBox.ServiceManager' facet");
+    }
+    catch (const Ice::Exception&)
+    {
+        exception(current_exception());
+    }
+}
+
+void
+Parser::statusService(const list<string>& args)
+{
+    if (args.size() != 2)
+    {
+        invalidCommand("service status", "requires exactly two arguments");
+        return;
+    }
+
+    const string& server = args.front();
+    string service = *(++args.begin());
+    try
+    {
+        auto admin = _admin->getServerAdmin(server);
+        auto manager = admin->ice_facet<IceBox::ServiceManagerPrx>("IceBox.ServiceManager");
+        bool running = manager->isServiceRunning(service);
+        consoleOut << (running ? "running" : "stopped") << endl;
     }
     catch (const IceBox::NoSuchServiceException&)
     {
