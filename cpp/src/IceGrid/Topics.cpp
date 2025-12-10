@@ -24,22 +24,9 @@ ObserverTopic::ObserverTopic(const IceStorm::TopicManagerPrx& topicManager, cons
     for (const auto& encoding : encodings)
     {
         ostringstream os;
-        os << name << "-" << Ice::encodingVersionToString(encoding);
+        os << name << "-" << encoding;
 
-        optional<IceStorm::TopicPrx> topic;
-        try
-        {
-            topic = topicManager->create(os.str());
-        }
-        catch (const IceStorm::TopicExists&)
-        {
-            topic = topicManager->retrieve(os.str());
-        }
-
-        if (!topic)
-        {
-            throw Ice::MarshalException(__FILE__, __LINE__, "failed to create or retrieve topic '" + os.str() + "'");
-        }
+        optional<IceStorm::TopicPrx> topic = topicManager->createOrRetrieve(os.str());
 
         //
         // NOTE: collocation optimization needs to be turned on for the
