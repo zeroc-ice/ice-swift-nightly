@@ -33,7 +33,7 @@ let package = Package(
         .plugin(name: "CompileSlice", targets: ["CompileSlice"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/zeroc-ice/mcpp.git", branch: "master"),
+        .package(url: "https://github.com/zeroc-ice/mcpp.git", revision: "4137e39e62bd22c232b470c9516669fc3d1a1353"),
         .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.4.3"),
     ],
     targets: [
@@ -76,19 +76,19 @@ let package = Package(
         ),
         .binaryTarget(
             name: "IceCpp",
-            url: "https://download.zeroc.com/ice/nightly/Ice-3.8.0-nightly.20251217.1.xcframework.zip",
-            checksum: "d06454adbee03df3f6a44ccf4dcaa433bc7e38dc88ff9c80725ac4ae99f6b5e3"
+            url: "https://download.zeroc.com/ice/nightly/Ice-3.8.0-nightly.20251218.1.xcframework.zip",
+            checksum: "5b0ae1927a570511708f6002d01116af746652e4639e3c01f31eea9d11f5d616"
         ),
         .binaryTarget(
             name: "IceDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/nightly/IceDiscovery-3.8.0-nightly.20251217.1.xcframework.zip",
-            checksum: "ce8935f208bcfb8311680a35487361f6226c6f4db8b833702b9d131400fc6ace"
+            url: "https://download.zeroc.com/ice/nightly/IceDiscovery-3.8.0-nightly.20251218.1.xcframework.zip",
+            checksum: "551d9b32881cbb441f0d50b27fd9c05b415fa0a764b3aad5481b9bfc39d868ff"
 
         ),
         .binaryTarget(
             name: "IceLocatorDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/nightly/IceLocatorDiscovery-3.8.0-nightly.20251217.1.xcframework.zip",
-            checksum: "cde17cda4f3bba1612b689a1cc5ad03cee6830748dd6acadfdfd0604af7057b4"
+            url: "https://download.zeroc.com/ice/nightly/IceLocatorDiscovery-3.8.0-nightly.20251218.1.xcframework.zip",
+            checksum: "d85119df0e9c035a024bfcb1e88b4b1a29315be669eca304a3ff980276d4f169"
         ),
         .executableTarget(
             name: "slice2swift",
