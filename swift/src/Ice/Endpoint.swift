@@ -62,10 +62,8 @@ open class EndpointInfo {
 open class IPEndpointInfo: EndpointInfo {
     /// The host or address configured with the endpoint.
     public let host: String
-
     /// The port number.
     public let port: Int32
-
     /// The source IP address.
     public let sourceAddress: String
 
@@ -105,7 +103,6 @@ public final class SSLEndpointInfo: EndpointInfo {
 public final class UDPEndpointInfo: IPEndpointInfo {
     /// The multicast interface.
     public let mcastInterface: String
-
     /// The multicast time-to-live (or hops).
     public let mcastTtl: Int32
 
@@ -142,13 +139,10 @@ public final class WSEndpointInfo: EndpointInfo {
 public final class IAPEndpointInfo: EndpointInfo {
     /// The accessory manufacturer. Can be empty.
     public let manufacturer: String
-
     /// The accessory model number. Can be empty.
     public let modelNumber: String
-
     /// The accessory name. Can be empty.
     public let name: String
-
     /// The protocol supported by the accessory.
     public let `protocol`: String
 
@@ -181,7 +175,6 @@ public final class IAPEndpointInfo: EndpointInfo {
 public final class OpaqueEndpointInfo: EndpointInfo {
     /// The encoding version of the opaque endpoint (to decode or encode the rawBytes).
     public let rawEncoding: EncodingVersion
-
     /// The raw encoding of the opaque endpoint.
     public let rawBytes: ByteSeq
 

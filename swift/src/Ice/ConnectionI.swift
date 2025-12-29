@@ -10,6 +10,7 @@ extension Connection {
 }
 
 final class ConnectionI: LocalObject<ICEConnection>, Connection, @unchecked Sendable {
+
     func abort() {
         handle.abort()
     }
