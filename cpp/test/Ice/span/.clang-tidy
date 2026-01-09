@@ -1,6 +1,0 @@
-Checks:
-'
-  -modernize-use-constraints
-'
-InheritParentConfig: true
-ExtraArgs: ['-std=c++20']

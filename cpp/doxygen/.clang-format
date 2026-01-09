@@ -1,6 +1,0 @@
----
-# See https://clang.llvm.org/docs/ClangFormatStyleOptions.html
-BasedOnStyle: InheritParentConfig
----
-Language: Cpp
-ColumnLimit: 90
