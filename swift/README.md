@@ -12,7 +12,7 @@ Ice for Swift is the Swift implementation of the Ice framework.
 To add Ice to your project, add the following URL as a dependency in your Package.swift:
 
 ```swift
-dependencies: [.package(url: "https://github.com/zeroc-ice/ice.git", .upToNextMinor(from: "3.8.0"))],
+dependencies: [.package(url: "https://github.com/zeroc-ice/ice-swift-nightly.git", branch: "main")],
 ```
 
 Next, add the products you need to your target's dependencies:
@@ -21,7 +21,7 @@ Next, add the products you need to your target's dependencies:
 targets: [
     .executableTarget(
         name: "MyTarget",
-        dependencies: [.product(name: "Ice", package: "ice")],
+        dependencies: [.product(name: "Ice", package: "ice-swift-nightly")],
     ),
  ]
 ```
@@ -109,7 +109,7 @@ struct Chatbot: Greeter {
 }
 ```
 
-[Examples]: https://github.com/zeroc-ice/ice-demos/tree/3.8/swift
-[Documentation]: https://docs.zeroc.com/ice/3.8/swift/
+[Examples]: https://github.com/zeroc-ice/ice-demos/tree/main/swift
+[Documentation]: https://docs.zeroc.com/ice/latest/swift/
 [Building from source]: ./BUILDING.md
 [Ice framework]: https://github.com/zeroc-ice/ice
