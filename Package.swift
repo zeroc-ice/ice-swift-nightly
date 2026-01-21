@@ -33,7 +33,7 @@ let package = Package(
         .plugin(name: "CompileSlice", targets: ["CompileSlice"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/zeroc-ice/mcpp.git", revision: "4137e39e62bd22c232b470c9516669fc3d1a1353"),
+        .package(url: "https://github.com/zeroc-ice/mcpp.git", revision: "0dbe51946cce23c692c59cf75909daf4fcdfd1d2"),
         .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.4.3"),
     ],
     targets: [
@@ -76,19 +76,19 @@ let package = Package(
         ),
         .binaryTarget(
             name: "IceCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/Ice-3.9.0-nightly.20260120.1.xcframework.zip",
-            checksum: "ecab06aecee343c8b53a738e4a4e24590a3a5e645a1eb834fc86d512b8be0769"
+            url: "https://download.zeroc.com/ice/nightly/3.9/Ice-3.9.0-nightly.20260121.1.xcframework.zip",
+            checksum: "aad975a3c3e8c353c802d133ea5f4bb4e8ca3af5456dc38d4ea5f70a4fb7d5ac"
         ),
         .binaryTarget(
             name: "IceDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/IceDiscovery-3.9.0-nightly.20260120.1.xcframework.zip",
-            checksum: "030af25c523165d8e4ea774b4dd531a509705feaf22ba8339704790b58435dc8"
+            url: "https://download.zeroc.com/ice/nightly/3.9/IceDiscovery-3.9.0-nightly.20260121.1.xcframework.zip",
+            checksum: "c7c9ac1f9e491594d651fa1ef212fa932622fb5a393081d0a78062914ac6e19f"
 
         ),
         .binaryTarget(
             name: "IceLocatorDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/IceLocatorDiscovery-3.9.0-nightly.20260120.1.xcframework.zip",
-            checksum: "227bcba6311db85c2ca42b5255ef6cc567f33e2692463a52c893d681689e198b"
+            url: "https://download.zeroc.com/ice/nightly/3.9/IceLocatorDiscovery-3.9.0-nightly.20260121.1.xcframework.zip",
+            checksum: "364f9db4f1a388c092e2edb3f87fd52a01ac8b24bd0e16337352ebfffdbacc8c"
         ),
         .executableTarget(
             name: "slice2swift",
