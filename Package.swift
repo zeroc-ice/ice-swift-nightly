@@ -3,21 +3,6 @@
 import Foundation
 import PackageDescription
 
-let iceUtilSources: [String] = [
-    "src/Ice/ConsoleUtil.cpp",
-    "src/Ice/CtrlCHandler.cpp",
-    "src/Ice/Demangle.cpp",
-    "src/Ice/Exception.cpp",
-    "src/Ice/FileUtil.cpp",
-    "src/Ice/LocalException.cpp",
-    "src/Ice/Options.cpp",
-    "src/Ice/OutputUtil.cpp",
-    "src/Ice/Random.cpp",
-    "src/Ice/StringConverter.cpp",
-    "src/Ice/StringUtil.cpp",
-    "src/Ice/UUID.cpp",
-]
-
 let package = Package(
     name: "ice",
     defaultLocalization: "en",
@@ -33,8 +18,7 @@ let package = Package(
         .plugin(name: "CompileSlice", targets: ["CompileSlice"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/zeroc-ice/mcpp.git", revision: "0dbe51946cce23c692c59cf75909daf4fcdfd1d2"),
-        .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.4.3"),
+        .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.4.3")
     ],
     targets: [
         .target(
@@ -76,41 +60,24 @@ let package = Package(
         ),
         .binaryTarget(
             name: "IceCpp",
-            url: "https://download.zeroc.com/ice/3.8/Ice-3.8.0.xcframework.zip",
-            checksum: "9ae4a1f6acdd9bb2b8313248fc608d00eb92e12a4c54c11620b3b632f75d2ff1"
+            url: "https://download.zeroc.com/ice/nightly/3.8/Ice-3.8.1-nightly.20260206.2.xcframework.zip",
+            checksum: "d2671230a647704b4243931e957bcb81a343351c7cf56eefaf9cdc6c24eeb762"
         ),
         .binaryTarget(
             name: "IceDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/3.8/IceDiscovery-3.8.0.xcframework.zip",
-            checksum: "b8ae3ce32d97e835442f4d9c8349dc351228e8f505bb1fe14787a6249c53bd2e"
+            url: "https://download.zeroc.com/ice/nightly/3.8/IceDiscovery-3.8.1-nightly.20260206.2.xcframework.zip",
+            checksum: "2315d7852a97e924e7fcb702d179788361f291513eb1bd3071ed0bf823dfd7b5"
 
         ),
         .binaryTarget(
             name: "IceLocatorDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/3.8/IceLocatorDiscovery-3.8.0.xcframework.zip",
-            checksum: "fafbab3290984aee378087b041d256f846e3b8461e56fc1e667546a4dc44ecde"
+            url: "https://download.zeroc.com/ice/nightly/3.8/IceLocatorDiscovery-3.8.1-nightly.20260206.2.xcframework.zip",
+            checksum: "da25eb2483ca094b916c3b6f0544c1d709f3bb2423bfa84895849dda8130a932"
         ),
-        .executableTarget(
+        .binaryTarget(
             name: "slice2swift",
-            dependencies: ["mcpp"],
-            path: "cpp",
-            exclude: [
-                "test",
-                "src/slice2swift/build",
-                "src/slice2swift/msbuild",
-                "src/slice2swift/Slice2Swift.rc",
-                "src/Slice/build",
-                "src/Slice/msbuild",
-                "src/Slice/Scanner.l",
-                "src/Slice/Grammar.y",
-                "src/Slice/Makefile.mk",
-            ],
-            sources: ["src/slice2swift", "src/Slice"] + iceUtilSources,
-            publicHeadersPath: "src/slice2swift",
-            cxxSettings: [
-                .headerSearchPath("src"),
-                .headerSearchPath("include"),
-            ]
+            url: "https://download.zeroc.com/ice/nightly/3.8/slice2swift-3.8.1-nightly.20260206.2.artifactbundle.zip",
+            checksum: "97fbd0b6746757eb638e8f60f9b9e6de2643b7f1bf266fce478d21c799e0bcb0"
         ),
         .plugin(
             name: "CompileSlice",
