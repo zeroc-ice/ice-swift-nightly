@@ -6,7 +6,6 @@
 #include "../Slice/FileTracker.h"
 #include "../Slice/Preprocessor.h"
 #include "../Slice/Util.h"
-#include "CsUtil.h"
 #include "Gen.h"
 #include "Ice/CtrlCHandler.h"
 

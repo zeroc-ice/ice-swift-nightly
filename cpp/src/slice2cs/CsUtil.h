@@ -50,7 +50,7 @@ namespace Slice::Csharp
         IceInternal::Output& out,
         const std::string& openTag,
         const std::string& comment,
-        const std::optional<std::string>& closeTag = std::nullopt);
+        std::optional<std::string> closeTag = std::nullopt);
 
     /// Writes an XML doc-comment with one or more lines. If there are multiple lines, the comment is written on
     /// multiple lines. If there is only one line, the comment is written on a single line.
@@ -58,7 +58,7 @@ namespace Slice::Csharp
         IceInternal::Output& out,
         const std::string& openTag,
         const StringList& lines,
-        const std::optional<std::string>& closeTag = std::nullopt);
+        std::optional<std::string> closeTag = std::nullopt);
 
     //
     // Generate code to marshal or unmarshal a type
