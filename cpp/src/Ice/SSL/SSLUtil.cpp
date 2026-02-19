@@ -67,6 +67,12 @@ Ice::SSL::parseBytes(const string& arg, vector<unsigned char>& buffer)
     }
     v = s.str();
 
+    // Each byte requires exactly two hex digits; reject odd-length strings.
+    if (v.size() % 2 != 0)
+    {
+        return false;
+    }
+
     // Convert the bytes.
     for (size_t i = 0, length = v.size(); i + 2 <= length;)
     {
@@ -86,7 +92,12 @@ Ice::SSL::readFile(const string& file, vector<char>& buffer)
     }
 
     is.seekg(0, is.end);
-    buffer.resize(static_cast<size_t>(is.tellg()));
+    streampos size = is.tellg();
+    if (size == streampos{-1})
+    {
+        throw CertificateReadException(__FILE__, __LINE__, "error determining file size: " + file);
+    }
+    buffer.resize(static_cast<size_t>(size));
     is.seekg(0, is.beg);
 
     if (!buffer.empty())
@@ -345,7 +356,7 @@ Ice::SSL::getSubjectAltNames(PCCERT_CONTEXT cert)
                                 os << ".";
                             }
                         }
-                        altNames.push_back(make_pair(AltNAmeIP, os.str()));
+                        altNames.push_back(make_pair(AltNameIP, os.str()));
                     }
                     //
                     // TODO IPv6 Address support.
@@ -473,6 +484,10 @@ namespace
     string convertX509NameToString(X509_name_st* name)
     {
         BIO* out = BIO_new(BIO_s_mem());
+        if (!out)
+        {
+            throw CertificateEncodingException(__FILE__, __LINE__, "SSL transport: error allocating BIO");
+        }
         X509_NAME_print_ex(out, name, 0, XN_FLAG_RFC2253);
         BUF_MEM* p;
         BIO_get_mem_ptr(out, &p);
@@ -621,6 +636,10 @@ string
 Ice::SSL::encodeCertificate(X509* certificate)
 {
     BIO* out = BIO_new(BIO_s_mem());
+    if (!out)
+    {
+        throw CertificateEncodingException(__FILE__, __LINE__, "SSL transport: error allocating BIO");
+    }
     int i = PEM_write_bio_X509(out, certificate);
     if (i <= 0)
     {
