@@ -46,6 +46,8 @@ namespace Ice::SSL
     // Determine if a directory exists, with an optional parent directory.
     std::optional<std::string> resolveDirPath(const std::string& path, const std::string& parentDir = "");
 
+    /// Parse a hex string (e.g., "AB:CD:EF" or "ABCDEF") into a byte buffer. Spaces and colons are ignored.
+    /// @return `false` if the string contains invalid characters or has an odd number of hex digits.
     bool parseBytes(const std::string&, std::vector<unsigned char>&);
 
 #if defined(ICE_USE_SCHANNEL)
@@ -57,6 +59,10 @@ namespace Ice::SSL
     {
     public:
         ScopedCertificate(PCCERT_CONTEXT certificate) : _certificate(certificate) {}
+        ScopedCertificate(const ScopedCertificate&) = delete;
+        ScopedCertificate& operator=(const ScopedCertificate&) = delete;
+        ScopedCertificate(ScopedCertificate&&) = delete;
+        ScopedCertificate& operator=(ScopedCertificate&&) = delete;
         ~ScopedCertificate();
         PCCERT_CONTEXT get() const { return _certificate; }
 
@@ -74,6 +80,10 @@ namespace Ice::SSL
     {
     public:
         ScopedCertificate(SecCertificateRef certificate) : _certificate(certificate) {}
+        ScopedCertificate(const ScopedCertificate&) = delete;
+        ScopedCertificate& operator=(const ScopedCertificate&) = delete;
+        ScopedCertificate(ScopedCertificate&&) = delete;
+        ScopedCertificate& operator=(ScopedCertificate&&) = delete;
         ~ScopedCertificate();
         [[nodiscard]] SecCertificateRef get() const { return _certificate; }
 
@@ -91,6 +101,10 @@ namespace Ice::SSL
     {
     public:
         ScopedCertificate(X509* certificate) : _certificate(certificate) {}
+        ScopedCertificate(const ScopedCertificate&) = delete;
+        ScopedCertificate& operator=(const ScopedCertificate&) = delete;
+        ScopedCertificate(ScopedCertificate&&) = delete;
+        ScopedCertificate& operator=(ScopedCertificate&&) = delete;
         ~ScopedCertificate();
         [[nodiscard]] X509* get() const { return _certificate; }
 
