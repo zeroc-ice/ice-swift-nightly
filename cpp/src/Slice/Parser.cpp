@@ -11,7 +11,6 @@
 #include <cassert>
 #include <cstring>
 #include <iterator>
-#include <limits>
 
 using namespace std;
 using namespace Slice;
@@ -640,15 +639,13 @@ Slice::Contained::scope() const
 string
 Slice::Contained::mappedName() const
 {
-    // First check if any 'xxx:identifier' has been applied to this element.
-    // If so, we return that instead of the element's Slice identifier.
-    const string metadata = unit()->languageName() + ":identifier";
-    if (auto customName = getMetadataArgs(metadata))
-    {
-        return *customName;
-    }
+    return customMappedName().value_or(unit()->defaultMappedName(*this));
+}
 
-    return _name;
+optional<string>
+Slice::Contained::customMappedName() const
+{
+    return getMetadataArgs(unit()->languageName() + ":identifier");
 }
 
 string
@@ -784,6 +781,8 @@ Slice::Contained::isDeprecated() const
 optional<string>
 Slice::Contained::getDeprecationReason() const
 {
+    // The compiler doesn't allow both 'deprecate' and 'deprecated' to be applied to the same element.
+    // If both are present, 'deprecated' will be kept, and 'deprecate' will be thrown away.
     string reasonMessage;
     if (auto reason = getMetadataArgs("deprecate"))
     {
@@ -1419,7 +1418,7 @@ Slice::Container::createConst(
     return p;
 }
 
-TypeList
+TypePtr
 Slice::Container::lookupType(const string& identifier)
 {
     // Remove whitespace.
@@ -1434,14 +1433,14 @@ Slice::Container::lookupType(const string& identifier)
     auto kind = Builtin::kindFromString(sc);
     if (kind)
     {
-        return {unit()->createBuiltin(*kind)};
+        return unit()->createBuiltin(*kind);
     }
 
     // Not a builtin type, try to look up a user-defined type.
     return lookupTypeNoBuiltin(identifier, true);
 }
 
-TypeList
+TypePtr
 Slice::Container::lookupTypeNoBuiltin(const string& identifier, bool emitErrors, bool ignoreUndefined)
 {
     // Remove whitespace.
@@ -1458,7 +1457,7 @@ Slice::Container::lookupTypeNoBuiltin(const string& identifier, bool emitErrors,
         return unit()->lookupTypeNoBuiltin(sc.substr(2), emitErrors);
     }
 
-    TypeList results;
+    optional<TypePtr> resolvedType;
     bool typeError = false;
     vector<string> errors;
 
@@ -1470,70 +1469,66 @@ Slice::Container::lookupTypeNoBuiltin(const string& identifier, bool emitErrors,
             continue; // Ignore interface and class definitions.
         }
 
-        if (emitErrors && matches.front()->scoped() != (thisScope() + sc))
+        if (p->scoped() != (thisScope() + sc))
         {
             ostringstream os;
             os << p->kindOf() << " name '" << identifier << "' is capitalized inconsistently with its previous name: '"
-               << matches.front()->scoped() << "'";
+               << p->scoped() << "'";
             errors.push_back(os.str());
         }
 
-        ExceptionPtr ex = dynamic_pointer_cast<Exception>(p);
-        if (ex)
+        if (TypePtr type = dynamic_pointer_cast<Type>(p))
         {
-            if (emitErrors)
-            {
-                ostringstream os;
-                os << "'" << sc << "' is an exception, which cannot be used as a type";
-                unit()->error(os.str());
-            }
-            return {};
+            resolvedType = type;
         }
+        else if (ExceptionPtr ex = dynamic_pointer_cast<Exception>(p))
+        {
+            resolvedType = nullptr;
 
-        TypePtr type = dynamic_pointer_cast<Type>(p);
-        if (!type)
+            ostringstream os;
+            os << "'" << sc << "' is an exception, which cannot be used as a type";
+            errors.push_back(os.str());
+        }
+        else
         {
             typeError = true;
-            if (emitErrors)
-            {
-                ostringstream os;
-                os << "'" << sc << "' is not a type";
-                errors.push_back(os.str());
-            }
-            break; // Possible that correct match is higher in scope
+
+            ostringstream os;
+            os << "'" << sc << "' is not a type";
+            errors.push_back(os.str());
         }
-        results.push_back(type);
+        break;
     }
 
-    if (results.empty())
+    if (!resolvedType.has_value())
     {
         ContainedPtr contained = dynamic_pointer_cast<Contained>(shared_from_this());
         if (contained)
         {
-            results = contained->container()->lookupTypeNoBuiltin(sc, emitErrors, typeError || ignoreUndefined);
-        }
-        else if (!typeError)
-        {
-            if (emitErrors && !ignoreUndefined)
+            TypePtr parent = contained->container()->lookupTypeNoBuiltin(sc, emitErrors, typeError || ignoreUndefined);
+            if (parent)
             {
-                ostringstream os;
-                os << "'" << sc << "' is not defined";
-                unit()->error(os.str());
+                resolvedType = parent;
             }
-            return {};
+        }
+        else if (!typeError && !ignoreUndefined)
+        {
+            ostringstream os;
+            os << "'" << sc << "' is not defined";
+            errors.push_back(os.str());
         }
     }
 
     // Do not emit errors if there was a type error but a match was found in a higher scope.
-    // TODO The second part of this check looks funny to me.
-    if (emitErrors && !(typeError && !results.empty()))
+    if (emitErrors && (!typeError || !resolvedType.has_value()))
     {
         for (const auto& error : errors)
         {
             unit()->error(error);
         }
     }
-    return results;
+
+    return resolvedType.value_or(nullptr);
 }
 
 ContainedList
@@ -1597,31 +1592,23 @@ Slice::Container::lookupContained(const string& identifier, bool emitErrors)
 InterfaceDefPtr
 Slice::Container::lookupInterfaceDef(const string& identifier, bool emitErrors)
 {
-    TypeList types = lookupType(identifier);
-    if (!types.empty())
+    TypePtr resolvedType = lookupType(identifier);
+    if (resolvedType)
     {
-        auto interface = dynamic_pointer_cast<InterfaceDecl>(types.front());
-        if (!interface)
+        if (auto interface = dynamic_pointer_cast<InterfaceDecl>(resolvedType))
         {
-            if (emitErrors)
-            {
-                unit()->error("'" + identifier + "' is not an interface");
-            }
-        }
-        else
-        {
-            InterfaceDefPtr def = interface->definition();
-            if (!def)
-            {
-                if (emitErrors)
-                {
-                    unit()->error("'" + identifier + "' has been declared but not defined");
-                }
-            }
-            else
+            if (InterfaceDefPtr def = interface->definition())
             {
                 return def;
             }
+            else if (emitErrors)
+            {
+                unit()->error("'" + identifier + "' has been declared but not defined");
+            }
+        }
+        else if (emitErrors)
+        {
+            unit()->error("'" + identifier + "' is not an interface");
         }
     }
 
@@ -2211,7 +2198,7 @@ Slice::ClassDecl::isClassType() const
 size_t
 Slice::ClassDecl::minWireSize() const
 {
-    return 1; // At least four bytes for an instance, if the instance is marshaled as an index.
+    return 1; // A class can be marshaled as an index, which uses the size encoding, which uses either 1 or 5 bytes.
 }
 
 string
@@ -2969,10 +2956,9 @@ Slice::Operation::hasMarshaledResult() const
             return true;
         }
 
-        for (const auto& p : _contents)
+        for (const auto& p : outParameters())
         {
-            ParameterPtr q = dynamic_pointer_cast<Parameter>(p);
-            if (q->isOutParam() && isMutableAfterReturnType(q->type()))
+            if (isMutableAfterReturnType(p->type()))
             {
                 return true;
             }
@@ -3082,7 +3068,6 @@ ParameterList
 Slice::Operation::outParameters() const
 {
     ParameterList result;
-
     for (const auto& p : _contents)
     {
         ParameterPtr q = dynamic_pointer_cast<Parameter>(p);
@@ -4062,11 +4047,7 @@ Slice::Enum::destroy()
     destroyContents();
 }
 
-Slice::Enum::Enum(const ContainerPtr& container, const string& name)
-    : Contained(container, name),
-      _minValue(numeric_limits<int32_t>::max())
-{
-}
+Slice::Enum::Enum(const ContainerPtr& container, const string& name) : Contained(container, name) {}
 
 // ----------------------------------------------------------------------
 // Enumerator
@@ -4304,15 +4285,28 @@ Slice::DataMember::DataMember(
 // ----------------------------------------------------------------------
 
 UnitPtr
-Slice::Unit::createUnit(string languageName, bool all)
+Slice::Unit::createUnit(string languageName, UnitOptions options)
 {
-    return make_shared<Unit>(std::move(languageName), all);
+    return make_shared<Unit>(std::move(languageName), std::move(options));
 }
 
 string
 Slice::Unit::languageName() const
 {
     return _languageName;
+}
+
+string
+Slice::Unit::defaultMappedName(const Contained& contained) const
+{
+    if (_defaultMappedName)
+    {
+        return _defaultMappedName(contained);
+    }
+    else
+    {
+        return contained.name();
+    }
 }
 
 void
@@ -4854,9 +4848,12 @@ Slice::Unit::getTopLevelModules(const string& file) const
     }
 }
 
-Slice::Unit::Unit(string languageName, bool all) : _languageName(std::move(languageName)), _all(all)
+Slice::Unit::Unit(string languageName, UnitOptions options)
+    : _languageName(std::move(languageName)),
+      _all(options.all),
+      _defaultMappedName(std::move(options.defaultMappedName))
 {
-    if (!languageName.empty())
+    if (!_languageName.empty())
     {
         assert(binary_search(&languages[0], &languages[sizeof(languages) / sizeof(*languages)], _languageName));
     }

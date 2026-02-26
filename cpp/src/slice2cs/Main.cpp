@@ -174,7 +174,7 @@ compile(const vector<string>& argv)
                 return EXIT_FAILURE;
             }
 
-            unit = Unit::createUnit("cs", false);
+            unit = Unit::createUnit("cs");
             int parseStatus = unit->parse(fileName, preprocessedHandle, debug);
 
             preprocessor->close();
@@ -260,12 +260,12 @@ main(int argc, char* argv[])
     }
     catch (const std::exception& ex)
     {
-        consoleErr << args[0] << ": error:" << ex.what() << endl;
+        consoleErr << args[0] << ": error: " << ex.what() << endl;
         return EXIT_FAILURE;
     }
     catch (...)
     {
-        consoleErr << args[0] << ": error:unknown exception" << endl;
+        consoleErr << args[0] << ": error: unknown exception" << endl;
         return EXIT_FAILURE;
     }
 }
