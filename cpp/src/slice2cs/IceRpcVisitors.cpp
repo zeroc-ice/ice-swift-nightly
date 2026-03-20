@@ -615,7 +615,7 @@ Slice::IceRpc::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
     _out.dec();
 
     // Implicit base conversions
-    for (const auto& base : p->bases())
+    for (const auto& base : p->allBases())
     {
         _out << sp;
         string baseName = getUnqualified(base, ns, "", "Proxy");
@@ -697,7 +697,7 @@ Slice::IceRpc::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
 
         _out << " =>";
         _out.inc();
-        _out << nl << "(" << getUnqualified(operation->interface(), ns, "", "Proxy") << ")this."
+        _out << nl << "((" << getUnqualified(operation->interface(), ns, "", "Proxy") << ")this)."
              << removeEscapePrefix(operation->mappedName()) << "Async";
         _out << spar;
         for (const auto& param : operation->inParameters())
