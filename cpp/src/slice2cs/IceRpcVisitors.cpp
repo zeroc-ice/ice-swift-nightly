@@ -519,170 +519,7 @@ Slice::IceRpc::TypesVisitor::visitEnum(const EnumPtr& p)
 }
 
 bool
-Slice::IceRpc::TypesVisitor::writePrimaryConstructor(
-    const ContainedPtr& p,
-    const DataMemberList& fields,
-    const DataMemberList& allBaseFields,
-    const string& kind)
-{
-    // Primary constructor with parameters for all fields.
-    string escapedName = p->mappedName();
-    string name = removeEscapePrefix(escapedName);
-    string ns = getNamespace(p);
-
-    _out << sp;
-    writeDocLine(
-        _out,
-        "summary",
-        "Initializes a new instance of the <see cref=\"" + escapedName + "\" /> " + kind + ".");
-
-    vector<string> ctorParams;
-    vector<string> baseParams;
-    vector<string> ctorPropertyInits;
-    bool hasRequiredField = false;
-
-    for (const auto& field : allBaseFields)
-    {
-        string paramName = field->customMappedName().value_or(toCamelCase(field->name()));
-        ctorParams.push_back(csFieldType(field->type(), ns, field->optional()) + " " + paramName);
-        if (csRequired(field))
-        {
-            hasRequiredField = true;
-        }
-        baseParams.push_back(paramName);
-    }
-
-    for (const auto& field : fields)
-    {
-        string paramName = field->customMappedName().value_or(toCamelCase(field->name()));
-        ctorParams.push_back(csFieldType(field->type(), ns, field->optional()) + " " + paramName);
-        if (csRequired(field))
-        {
-            hasRequiredField = true;
-        }
-
-        ctorPropertyInits.push_back("this." + field->mappedName() + " = " + paramName + ';');
-    }
-
-    if (hasRequiredField)
-    {
-        _out << nl << "[global::System.Diagnostics.CodeAnalysis.SetsRequiredMembers]";
-    }
-
-    _out << nl << accessModifier(p) << ' ' << escapedName << spar << ctorParams << epar;
-    if (!baseParams.empty())
-    {
-        _out.inc();
-        _out << nl << ": base" << spar << baseParams << epar;
-        _out.dec();
-    }
-
-    _out << sb;
-    for (const auto& propertyInit : ctorPropertyInits)
-    {
-        _out << nl << propertyInit;
-    }
-    _out << eb;
-    return hasRequiredField;
-}
-
-void
-Slice::IceRpc::TypesVisitor::writeEncodeDecode(
-    int compactId,
-    const string& ns,
-    bool hasBase,
-    const DataMemberList& fields,
-    const DataMemberList& orderedOptionalFields)
-{
-    _out << sp;
-    emitNonBrowsableAttribute();
-    _out << nl << "protected override void EncodeCore(ref IceEncoder encoder)";
-    _out << sb;
-    _out << nl << "encoder.StartSlice(IceTypeId";
-    if (compactId != -1)
-    {
-        _out << ", CompactIceTypeId";
-    }
-    _out << ");";
-    // Encode non-optional fields
-    for (const auto& field : fields)
-    {
-        if (!field->optional())
-        {
-            _out << nl;
-            encodeField(_out, "this." + field->mappedName(), field->type(), ns, TypeContext::Field, "encoder");
-            _out << ';';
-        }
-    }
-    // Encode optional fields
-    for (const auto& field : orderedOptionalFields)
-    {
-        encodeOptionalField(
-            _out,
-            field->tag(),
-            "this." + field->mappedName(),
-            field->type(),
-            ns,
-            TypeContext::Field,
-            "encoder");
-    }
-
-    if (hasBase)
-    {
-        _out << nl << "encoder.EndSlice(false);";
-        _out << nl << "base.EncodeCore(ref encoder);";
-    }
-    else
-    {
-        _out << nl << "encoder.EndSlice(true);"; // last slice
-    }
-    _out << eb;
-
-    _out << sp;
-    emitNonBrowsableAttribute();
-    _out << nl << "protected override void DecodeCore(ref IceDecoder decoder)";
-    _out << sb;
-    _out << nl << "decoder.StartSlice();";
-    // Decode non-optional fields
-    for (const auto& field : fields)
-    {
-        if (!field->optional())
-        {
-            _out << nl << "this." + field->mappedName() << " = ";
-            decodeField(_out, field->type(), ns);
-            _out << ';';
-        }
-    }
-    // Decode optional fields
-    for (const auto& field : orderedOptionalFields)
-    {
-        _out << nl << "this." + field->mappedName() << " = ";
-        decodeOptionalField(_out, field->tag(), field->type(), ns, TypeContext::Field);
-        _out << ';';
-    }
-
-    _out << nl << "decoder.EndSlice();";
-    if (hasBase)
-    {
-        _out << nl << "base.DecodeCore(ref decoder);";
-    }
-    _out << eb;
-}
-
-Slice::IceRpc::ProxyVisitor::ProxyVisitor(IceInternal::Output& out) : CsVisitor(out) {}
-
-bool
-Slice::IceRpc::ProxyVisitor::visitModuleStart(const ModulePtr& p)
-{
-    if (!p->contains<InterfaceDef>())
-    {
-        return false;
-    }
-    return CsVisitor::visitModuleStart(p);
-}
-
-bool
-Slice::IceRpc::ProxyVisitor::visitInterfaceDefStart(const InterfaceDefPtr& p)
+Slice::IceRpc::TypesVisitor::visitInterfaceDefStart(const InterfaceDefPtr& p)
 {
     string ns = getNamespace(p);
     string escapedName = p->mappedName();
@@ -710,7 +547,7 @@ Slice::IceRpc::ProxyVisitor::visitInterfaceDefStart(const InterfaceDefPtr& p)
 }
 
 void
-Slice::IceRpc::ProxyVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
+Slice::IceRpc::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
 {
     string ns = getNamespace(p);
     string escapedName = p->mappedName();
@@ -970,7 +807,7 @@ Slice::IceRpc::ProxyVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
 }
 
 void
-Slice::IceRpc::ProxyVisitor::visitOperation(const OperationPtr& p)
+Slice::IceRpc::TypesVisitor::visitOperation(const OperationPtr& p)
 {
     string ns = getNamespace(p->interface());
 
@@ -983,8 +820,159 @@ Slice::IceRpc::ProxyVisitor::visitOperation(const OperationPtr& p)
     _out << ';';
 }
 
+bool
+Slice::IceRpc::TypesVisitor::writePrimaryConstructor(
+    const ContainedPtr& p,
+    const DataMemberList& fields,
+    const DataMemberList& allBaseFields,
+    const string& kind)
+{
+    // Primary constructor with parameters for all fields.
+    string escapedName = p->mappedName();
+    string name = removeEscapePrefix(escapedName);
+    string ns = getNamespace(p);
+
+    _out << sp;
+    writeDocLine(
+        _out,
+        "summary",
+        "Initializes a new instance of the <see cref=\"" + escapedName + "\" /> " + kind + ".");
+
+    vector<string> ctorParams;
+    vector<string> baseParams;
+    vector<string> ctorPropertyInits;
+    bool hasRequiredField = false;
+
+    for (const auto& field : allBaseFields)
+    {
+        string paramName = field->customMappedName().value_or(toCamelCase(field->name()));
+        ctorParams.push_back(csFieldType(field->type(), ns, field->optional()) + " " + paramName);
+        if (csRequired(field))
+        {
+            hasRequiredField = true;
+        }
+        baseParams.push_back(paramName);
+    }
+
+    for (const auto& field : fields)
+    {
+        string paramName = field->customMappedName().value_or(toCamelCase(field->name()));
+        ctorParams.push_back(csFieldType(field->type(), ns, field->optional()) + " " + paramName);
+        if (csRequired(field))
+        {
+            hasRequiredField = true;
+        }
+
+        ctorPropertyInits.push_back("this." + field->mappedName() + " = " + paramName + ';');
+    }
+
+    if (hasRequiredField)
+    {
+        _out << nl << "[global::System.Diagnostics.CodeAnalysis.SetsRequiredMembers]";
+    }
+
+    _out << nl << accessModifier(p) << ' ' << escapedName << spar << ctorParams << epar;
+    if (!baseParams.empty())
+    {
+        _out.inc();
+        _out << nl << ": base" << spar << baseParams << epar;
+        _out.dec();
+    }
+
+    _out << sb;
+    for (const auto& propertyInit : ctorPropertyInits)
+    {
+        _out << nl << propertyInit;
+    }
+    _out << eb;
+    return hasRequiredField;
+}
+
 void
-Slice::IceRpc::ProxyVisitor::writeProxyRequestClass(const InterfaceDefPtr& interface)
+Slice::IceRpc::TypesVisitor::writeEncodeDecode(
+    int compactId,
+    const string& ns,
+    bool hasBase,
+    const DataMemberList& fields,
+    const DataMemberList& orderedOptionalFields)
+{
+    _out << sp;
+    emitNonBrowsableAttribute();
+    _out << nl << "protected override void EncodeCore(ref IceEncoder encoder)";
+    _out << sb;
+    _out << nl << "encoder.StartSlice(IceTypeId";
+    if (compactId != -1)
+    {
+        _out << ", CompactIceTypeId";
+    }
+    _out << ");";
+    // Encode non-optional fields
+    for (const auto& field : fields)
+    {
+        if (!field->optional())
+        {
+            _out << nl;
+            encodeField(_out, "this." + field->mappedName(), field->type(), ns, TypeContext::Field, "encoder");
+            _out << ';';
+        }
+    }
+    // Encode optional fields
+    for (const auto& field : orderedOptionalFields)
+    {
+        encodeOptionalField(
+            _out,
+            field->tag(),
+            "this." + field->mappedName(),
+            field->type(),
+            ns,
+            TypeContext::Field,
+            "encoder");
+    }
+
+    if (hasBase)
+    {
+        _out << nl << "encoder.EndSlice(false);";
+        _out << nl << "base.EncodeCore(ref encoder);";
+    }
+    else
+    {
+        _out << nl << "encoder.EndSlice(true);"; // last slice
+    }
+    _out << eb;
+
+    _out << sp;
+    emitNonBrowsableAttribute();
+    _out << nl << "protected override void DecodeCore(ref IceDecoder decoder)";
+    _out << sb;
+    _out << nl << "decoder.StartSlice();";
+    // Decode non-optional fields
+    for (const auto& field : fields)
+    {
+        if (!field->optional())
+        {
+            _out << nl << "this." + field->mappedName() << " = ";
+            decodeField(_out, field->type(), ns);
+            _out << ';';
+        }
+    }
+    // Decode optional fields
+    for (const auto& field : orderedOptionalFields)
+    {
+        _out << nl << "this." + field->mappedName() << " = ";
+        decodeOptionalField(_out, field->tag(), field->type(), ns, TypeContext::Field);
+        _out << ';';
+    }
+
+    _out << nl << "decoder.EndSlice();";
+    if (hasBase)
+    {
+        _out << nl << "base.DecodeCore(ref decoder);";
+    }
+    _out << eb;
+}
+
+void
+Slice::IceRpc::TypesVisitor::writeProxyRequestClass(const InterfaceDefPtr& interface)
 {
     string ns = getNamespace(interface);
 
@@ -1057,7 +1045,7 @@ Slice::IceRpc::ProxyVisitor::writeProxyRequestClass(const InterfaceDefPtr& inter
 }
 
 void
-Slice::IceRpc::ProxyVisitor::writeProxyResponseClass(const InterfaceDefPtr& interface)
+Slice::IceRpc::TypesVisitor::writeProxyResponseClass(const InterfaceDefPtr& interface)
 {
     string ns = getNamespace(interface);
 
