@@ -752,7 +752,6 @@ Slice::IceRpc::TypesVisitor::visitInterfaceDefEnd(const InterfaceDefPtr& p)
             _out << epar;
             _out << ',';
         }
-        _out << nl << "payloadContinuation: null,";
         _out << nl << "Response.Decode" << operationName << "Async,";
         _out << nl << featureParam << ",";
         if (operation->mode() == Operation::Idempotent)
