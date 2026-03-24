@@ -74,27 +74,34 @@ namespace
         if (operation->returnsAnyValues())
         {
             out << '<';
-            ParameterList returnParams = operation->outParameters();
-            if (operation->returnType())
+            if (dispatch && operation->hasMarshaledResult())
             {
-                string returnParamName = escapeCapitalizedParamName("ReturnValue", returnParams);
-                returnParams.insert(returnParams.begin(), operation->returnParameter(returnParamName));
-            }
-
-            if (returnParams.size() == 1)
-            {
-                out << csType(returnParams.front()->type(), ns, returnContext, returnParams.front()->optional());
+                out << "global::System.IO.Pipelines.PipeReader";
             }
             else
             {
-                out << spar;
-                for (const auto& param : returnParams)
+                ParameterList returnParams = operation->outParameters();
+                if (operation->returnType())
                 {
-                    out
-                        << (csType(param->type(), ns, returnContext, param->optional()) + " " +
-                            toPascalCase(param->mappedName()));
+                    string returnParamName = escapeCapitalizedParamName("ReturnValue", returnParams);
+                    returnParams.insert(returnParams.begin(), operation->returnParameter(returnParamName));
                 }
-                out << epar;
+
+                if (returnParams.size() == 1)
+                {
+                    out << csType(returnParams.front()->type(), ns, returnContext, returnParams.front()->optional());
+                }
+                else
+                {
+                    out << spar;
+                    for (const auto& param : returnParams)
+                    {
+                        out
+                            << (csType(param->type(), ns, returnContext, param->optional()) + " " +
+                                toPascalCase(param->mappedName()));
+                    }
+                    out << epar;
+                }
             }
             out << '>';
         }
