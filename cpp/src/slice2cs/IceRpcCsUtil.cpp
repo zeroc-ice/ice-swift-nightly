@@ -35,7 +35,7 @@ namespace
     [[nodiscard]] string getTagFormat(const TypePtr& type)
     {
         SequencePtr seq = dynamic_pointer_cast<Sequence>(type);
-        if (isString(type) || (seq && seq->type()->minWireSize() == 1))
+        if (isString(type) || (seq && !seq->type()->isVariableLength() && seq->type()->minWireSize() == 1))
         {
             return "OptimizedVSize";
         }
@@ -528,8 +528,12 @@ Slice::Csharp::decodeOptionalField(Output& out, int tag, const TypePtr& type, co
     out << nl << "tag: " << tag << ",";
     out << nl << "TagFormat." << getTagFormat(type) << ",";
     out << nl << "(ref IceDecoder decoder) => ";
-    // We need to cast to the optional type. This is especially important for value types.
-    out << "(" << csType(type, ns, context) << "?)";
+    // We need to cast to the optional type unless it's already optional (i.e. a proxy). This is especially important
+    // for value types.
+    if (!isProxyType(type))
+    {
+        out << "(" << csType(type, ns, context) << "?)";
+    }
     decodeField(out, type, ns);
     out << ",";
     out << nl << "useTagEndMarker: " << (context == TypeContext::Field ? "true" : "false");
