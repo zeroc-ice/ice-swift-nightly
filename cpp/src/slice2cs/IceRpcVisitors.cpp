@@ -197,6 +197,23 @@ Slice::IceRpc::TypesVisitor::visitStructEnd(const StructPtr& p)
     string escapedName = p->mappedName();
     string ns = getNamespace(p);
 
+    // We need an explicit public parameterless constructor if the struct has any default values.
+    for (const auto& field : p->dataMembers())
+    {
+        if (field->defaultValue())
+        {
+            _out << sp;
+            writeDocLine(
+                _out,
+                "summary",
+                "Initializes a new instance of the <see cref=\"" + escapedName + "\" /> struct.");
+            _out << nl << "public " << escapedName << "()";
+            _out << sb;
+            _out << eb;
+            break;
+        }
+    }
+
     bool hasRequiredField = writePrimaryConstructor(p, p->dataMembers(), {}, "struct");
 
     // Decoding constructor.
@@ -395,6 +412,20 @@ Slice::IceRpc::TypesVisitor::visitDataMember(const DataMemberPtr& p)
     else
     {
         _out << " { get; set; }";
+    }
+
+    if (p->defaultValue())
+    {
+        string defaultValue = *p->defaultValue();
+        BuiltinPtr builtin = dynamic_pointer_cast<Builtin>(p->type());
+
+        // Don't explicitly initialize to default value.
+        if (!builtin || builtin->kind() == Builtin::KindString || (defaultValue != "0" && defaultValue != "false"))
+        {
+            _out << " = ";
+            writeConstantValue(_out, p->type(), p->defaultValueType(), defaultValue, ns, "Value");
+            _out << ';';
+        }
     }
 }
 
@@ -825,6 +856,23 @@ Slice::IceRpc::TypesVisitor::visitOperation(const OperationPtr& p)
     _out << nl;
     writeMethodSignature(_out, p, ns, false);
     _out << ';';
+}
+
+void
+Slice::IceRpc::TypesVisitor::visitConst(const ConstPtr& p)
+{
+    string ns = getNamespace(p);
+
+    _out << sp;
+    writeIceRpcHelperDocComment(_out, p, "Provides the " + p->mappedName() + " constant.", "helper class");
+    emitAttributes(p);
+    _out << nl << accessModifier(p) << " static class " << p->mappedName();
+    _out << sb;
+    writeIceRpcDocComment(_out, p);
+    _out << nl << accessModifier(p) << " const " << csFieldType(p->type(), ns) << " Value = ";
+    writeConstantValue(_out, p->type(), p->valueType(), p->value(), ns, "Value");
+    _out << ';';
+    _out << eb;
 }
 
 bool
