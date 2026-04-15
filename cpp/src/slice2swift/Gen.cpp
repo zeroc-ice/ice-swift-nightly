@@ -1313,7 +1313,16 @@ Gen::TypesVisitor::visitOperation(const OperationPtr& op)
     //
     // Invoke
     //
-    out << sp;
+
+    if (op->hasMetadata("oneway"))
+    {
+        out << nl << "if _impl.ice_isTwoway()";
+        out << sb;
+        out << nl << "throw " << getUnqualified("Ice.OnewayOnlyException", swiftModule) << "(operation: \""
+            << op->name() << "\")";
+        out << eb;
+    }
+
     out << nl << "return try await _impl._invoke(";
 
     out.useCurrentPosAsIndent();
