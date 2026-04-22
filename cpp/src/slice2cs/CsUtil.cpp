@@ -115,11 +115,7 @@ Slice::Csharp::writeConstantValue(
 }
 
 void
-Slice::Csharp::writeDocLine(
-    Output& out,
-    const string& openTag,
-    const string& comment,
-    const std::optional<string>& closeTag)
+Slice::Csharp::writeDocLine(Output& out, const string& openTag, const string& comment, const optional<string>& closeTag)
 {
     if (comment.empty())
     {
@@ -238,9 +234,16 @@ Slice::Csharp::CsharpDocCommentFormatter::formatCode(const string& rawText)
 }
 
 string
-Slice::Csharp::CsharpDocCommentFormatter::formatParamRef(const string& param)
+Slice::Csharp::CsharpDocCommentFormatter::formatParamRef(const string& paramName, const ParameterPtr& paramPtr)
 {
-    return "<paramref name=\"" + param + "\" />";
+    if (paramPtr && paramPtr->isOutParam())
+    {
+        return formatCode(paramName);
+    }
+    else
+    {
+        return "<paramref name=\"" + paramName + "\" />";
+    }
 }
 
 string

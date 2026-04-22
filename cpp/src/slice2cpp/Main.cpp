@@ -25,7 +25,17 @@ namespace
 
 class CppDocCommentFormatter final : public DocCommentFormatter
 {
-    string formatParamRef(const string& param) final { return "@p " + param; }
+    string formatParamRef(const string& paramName, const ParameterPtr& paramPtr) final
+    {
+        if (paramPtr && paramPtr->isOutParam())
+        {
+            return formatCode(paramName);
+        }
+        else
+        {
+            return "@p " + paramName;
+        }
+    }
 
     string formatLink(const string& rawLink, const ContainedPtr& source, const SyntaxTreeBasePtr& target) final
     {
@@ -190,7 +200,7 @@ compile(const vector<string>& argv)
     Ice::CtrlCHandler ctrlCHandler;
     ctrlCHandler.setCallback(interruptedCallback);
 
-    std::map<string, StringList> dependencyMap;
+    map<string, StringList> dependencyMap;
 
     DependencyGenerator dependencyGenerator;
 
