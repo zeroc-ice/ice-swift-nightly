@@ -67,24 +67,24 @@ let package = Package(
         ),
         .binaryTarget(
             name: "IceCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/Ice-3.9.0-nightly.20260528.1.xcframework.zip",
-            checksum: "717f3800ca724f506452cbcf5b288e35d471b164b8a6c1904877707ee471ebfd"
+            url: "https://download.zeroc.com/ice/nightly/3.9/Ice-3.9.0-nightly.20260530.1.xcframework.zip",
+            checksum: "ec5eae117a5587ae230c367acf615ccda82eefe1abe7c7c1b5427b741057b2c6"
         ),
         .binaryTarget(
             name: "IceDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/IceDiscovery-3.9.0-nightly.20260528.1.xcframework.zip",
-            checksum: "09d38427362d40a158bace6f65debb00d219238ac6f8a166ff81307325089c22"
+            url: "https://download.zeroc.com/ice/nightly/3.9/IceDiscovery-3.9.0-nightly.20260530.1.xcframework.zip",
+            checksum: "544004581138db54cf4cfe85540cc7b0705471a0d22169fb57b6795e4f653d61"
 
         ),
         .binaryTarget(
             name: "IceLocatorDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/IceLocatorDiscovery-3.9.0-nightly.20260528.1.xcframework.zip",
-            checksum: "2c4a10ecd6fe858078f4c8c7d26a51efc18a35ef224ebb67892475caa9b2d0ff"
+            url: "https://download.zeroc.com/ice/nightly/3.9/IceLocatorDiscovery-3.9.0-nightly.20260530.1.xcframework.zip",
+            checksum: "9fccf32a493cdf6267a536af941d2842ecd47940a43784bb015bf98510bafa7f"
         ),
         .binaryTarget(
             name: "slice2swift",
-            url: "https://download.zeroc.com/ice/nightly/3.9/slice2swift-3.9.0-nightly.20260528.1.artifactbundle.zip",
-            checksum: "9b9fc3478d18834cdcc4b1657ebb7b04ed317710e98f44a8f32cf6780945c554"
+            url: "https://download.zeroc.com/ice/nightly/3.9/slice2swift-3.9.0-nightly.20260530.1.artifactbundle.zip",
+            checksum: "f10047b154fd773247f16dbcfaabc83885bb66c0632733cbda6bc209a8e2d382"
         ),
         .plugin(
             name: "CompileSlice",

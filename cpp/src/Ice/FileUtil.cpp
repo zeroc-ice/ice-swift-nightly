@@ -195,17 +195,6 @@ IceInternal::mkdir(const string& path, int)
     return ::_wmkdir(stringToWstring(path, Ice::getProcessStringConverter()).c_str());
 }
 
-FILE*
-IceInternal::fopen(const string& path, const string& mode)
-{
-    //
-    // Don't need to use a wide string converter, the wide strings are directly passed
-    // to Windows API.
-    //
-    const Ice::StringConverterPtr converter = Ice::getProcessStringConverter();
-    return ::_wfopen(stringToWstring(path, converter).c_str(), stringToWstring(mode, converter).c_str());
-}
-
 int
 IceInternal::getcwd(string& cwd)
 {
@@ -324,12 +313,6 @@ IceInternal::mkdir(const string& path, int perm)
     return ::mkdir(path.c_str(), static_cast<mode_t>(perm));
 }
 
-FILE*
-IceInternal::fopen(const string& path, const string& mode)
-{
-    return ::fopen(path.c_str(), mode.c_str());
-}
-
 int
 IceInternal::getcwd(string& cwd)
 {
@@ -350,7 +333,7 @@ IceInternal::unlink(const string& path)
 
 IceInternal::FileLock::FileLock(const std::string& path) : _path(path)
 {
-    _fd = ::open(path.c_str(), O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP);
+    _fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW, S_IRUSR | S_IWUSR);
     if (_fd < 0)
     {
         throw FileLockException(__FILE__, __LINE__, errno, _path);
