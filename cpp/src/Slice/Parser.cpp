@@ -2199,13 +2199,13 @@ Slice::Module::getTopLevelModule() const
         return parent->getTopLevelModule();
     }
     // Reaching here means that this module is at the top-level! We return it.
-    return dynamic_pointer_cast<Module>(const_pointer_cast<Container>(shared_from_this()));
+    return static_pointer_cast<Module>(const_pointer_cast<Container>(shared_from_this()));
 }
 
 void
 Slice::Module::visit(ParserVisitor* visitor)
 {
-    auto self = dynamic_pointer_cast<Module>(shared_from_this());
+    auto self = static_pointer_cast<Module>(shared_from_this());
     if (visitor->visitModuleStart(self))
     {
         visitContents(visitor);
@@ -2480,7 +2480,7 @@ Slice::ClassDef::kindOf() const
 void
 Slice::ClassDef::visit(ParserVisitor* visitor)
 {
-    auto self = dynamic_pointer_cast<ClassDef>(shared_from_this());
+    auto self = static_pointer_cast<ClassDef>(shared_from_this());
     if (visitor->visitClassDefStart(self))
     {
         visitContents(visitor);
@@ -2925,7 +2925,7 @@ Slice::InterfaceDef::kindOf() const
 void
 Slice::InterfaceDef::visit(ParserVisitor* visitor)
 {
-    auto self = dynamic_pointer_cast<InterfaceDef>(shared_from_this());
+    auto self = static_pointer_cast<InterfaceDef>(shared_from_this());
     if (visitor->visitInterfaceDefStart(self))
     {
         visitContents(visitor);
@@ -3088,12 +3088,11 @@ ParameterList
 Slice::Operation::inParameters() const
 {
     ParameterList result;
-    for (const auto& p : _contents)
+    for (const auto& p : parameters())
     {
-        ParameterPtr q = dynamic_pointer_cast<Parameter>(p);
-        if (q && !q->isOutParam())
+        if (!p->isOutParam())
         {
-            result.push_back(q);
+            result.push_back(p);
         }
     }
     return result;
@@ -3128,12 +3127,11 @@ ParameterList
 Slice::Operation::outParameters() const
 {
     ParameterList result;
-    for (const auto& p : _contents)
+    for (const auto& p : parameters())
     {
-        ParameterPtr q = dynamic_pointer_cast<Parameter>(p);
-        if (q && q->isOutParam())
+        if (p->isOutParam())
         {
-            result.push_back(q);
+            result.push_back(p);
         }
     }
     return result;
@@ -3253,9 +3251,9 @@ Slice::Operation::setExceptionList(const ExceptionList& exceptions)
 bool
 Slice::Operation::sendsClasses() const
 {
-    for (const auto& i : parameters())
+    for (const auto& i : inParameters())
     {
-        if (!i->isOutParam() && i->type()->usesClasses())
+        if (i->type()->usesClasses())
         {
             return true;
         }
@@ -3272,9 +3270,9 @@ Slice::Operation::returnsClasses() const
         return true;
     }
 
-    for (const auto& i : parameters())
+    for (const auto& i : outParameters())
     {
-        if (i->isOutParam() && i->type()->usesClasses())
+        if (i->type()->usesClasses())
         {
             return true;
         }
@@ -3285,25 +3283,7 @@ Slice::Operation::returnsClasses() const
 bool
 Slice::Operation::returnsData() const
 {
-    TypePtr t = returnType();
-    if (t)
-    {
-        return true;
-    }
-
-    for (const auto& i : parameters())
-    {
-        if (i->isOutParam())
-        {
-            return true;
-        }
-    }
-
-    if (!throws().empty())
-    {
-        return true;
-    }
-    return false;
+    return returnsAnyValues() || !throws().empty();
 }
 
 bool
@@ -3373,7 +3353,7 @@ Slice::Operation::kindOf() const
 void
 Slice::Operation::visit(ParserVisitor* visitor)
 {
-    visitor->visitOperation(dynamic_pointer_cast<Operation>(shared_from_this()));
+    visitor->visitOperation(static_pointer_cast<Operation>(shared_from_this()));
 }
 
 void
@@ -3609,7 +3589,7 @@ Slice::Exception::kindOf() const
 void
 Slice::Exception::visit(ParserVisitor* visitor)
 {
-    auto self = dynamic_pointer_cast<Exception>(shared_from_this());
+    auto self = static_pointer_cast<Exception>(shared_from_this());
     if (visitor->visitExceptionStart(self))
     {
         visitContents(visitor);
@@ -3764,7 +3744,7 @@ Slice::Struct::kindOf() const
 void
 Slice::Struct::visit(ParserVisitor* visitor)
 {
-    auto self = dynamic_pointer_cast<Struct>(shared_from_this());
+    auto self = static_pointer_cast<Struct>(shared_from_this());
     if (visitor->visitStructStart(self))
     {
         visitContents(visitor);
@@ -4098,7 +4078,7 @@ Slice::Enum::kindOf() const
 void
 Slice::Enum::visit(ParserVisitor* visitor)
 {
-    visitor->visitEnum(dynamic_pointer_cast<Enum>(shared_from_this()));
+    visitor->visitEnum(static_pointer_cast<Enum>(shared_from_this()));
 }
 
 void
@@ -4844,7 +4824,7 @@ Slice::Unit::destroy()
 void
 Slice::Unit::visit(ParserVisitor* visitor)
 {
-    auto self = dynamic_pointer_cast<Unit>(shared_from_this());
+    auto self = static_pointer_cast<Unit>(shared_from_this());
     if (visitor->visitUnitStart(self))
     {
         visitContents(visitor);
@@ -4873,7 +4853,7 @@ Slice::Unit::createBuiltin(Builtin::Kind kind)
     {
         return p->second;
     }
-    auto builtin = make_shared<Builtin>(dynamic_pointer_cast<Unit>(shared_from_this()), kind);
+    auto builtin = make_shared<Builtin>(static_pointer_cast<Unit>(shared_from_this()), kind);
     _builtins.insert(make_pair(kind, builtin));
     return builtin;
 }

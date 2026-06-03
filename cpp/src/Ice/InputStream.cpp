@@ -481,15 +481,7 @@ Ice::InputStream::read(std::vector<byte>& v)
 {
     std::pair<const byte*, const byte*> p;
     read(p);
-    if (p.first != p.second)
-    {
-        v.resize(static_cast<size_t>(p.second - p.first));
-        copy(p.first, p.second, v.begin());
-    }
-    else
-    {
-        v.clear();
-    }
+    v.assign(p.first, p.second);
 }
 
 void
@@ -1149,6 +1141,13 @@ Ice::InputStream::readOptImpl(int32_t readTag, OptionalFormat expectedFormat)
 
         auto format = static_cast<OptionalFormat>(v & 0x07); // First 3 bits.
         auto tag = static_cast<int32_t>(v >> 3);
+        if (tag > 30)
+        {
+            // We check for '> 30' instead of '> 29' because 30 is special sentinel tag, handled by the next block.
+            ostringstream os;
+            os << "invalid tag '" << tag << "': tags larger than 29 must be encoded as a size";
+            throw MarshalException(__FILE__, __LINE__, os.str());
+        }
         if (tag == 30)
         {
             tag = readSize();

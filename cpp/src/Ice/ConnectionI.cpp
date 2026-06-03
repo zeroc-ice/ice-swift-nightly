@@ -12,7 +12,8 @@
 #include "Ice/Properties.h"
 #include "IdleTimeoutTransceiverDecorator.h"
 #include "Instance.h"
-#include "ObjectAdapterI.h"   // For getThreadPool()
+#include "ObjectAdapterI.h" // For getThreadPool()
+#include "OutgoingResponseInternal.h"
 #include "ReferenceFactory.h" // For createProxy().
 #include "RequestHandler.h"   // For RetryException
 #include "ThreadPool.h"
@@ -1012,7 +1013,7 @@ Ice::ConnectionI::setAdapter(const ObjectAdapterPtr& adapter)
     {
         // Go through the adapter to set the adapter on this connection
         // to ensure the object adapter is still active.
-        dynamic_pointer_cast<ObjectAdapterI>(adapter)->setAdapterOnConnection(shared_from_this());
+        static_pointer_cast<ObjectAdapterI>(adapter)->setAdapterOnConnection(shared_from_this());
     }
     else
     {
@@ -2717,7 +2718,7 @@ Ice::ConnectionI::sendNextMessages(vector<OutgoingMessage>& callbacks)
                 _writeStream.swap(*message->stream);
                 if (message->sent())
                 {
-                    callbacks.push_back(*message);
+                    callbacks.push_back(std::move(*message));
                 }
             }
             _sendStreams.pop_front();
@@ -2850,7 +2851,7 @@ Ice::ConnectionI::sendMessage(OutgoingMessage& message)
     // message was queued.
     if (!_sendStreams.empty())
     {
-        _sendStreams.push_back(message);
+        _sendStreams.push_back(std::move(message));
         _sendStreams.back().adopt(nullptr);
         return AsyncStatusQueued;
     }
@@ -2895,7 +2896,7 @@ Ice::ConnectionI::sendMessage(OutgoingMessage& message)
             return status;
         }
 
-        _sendStreams.push_back(message);
+        _sendStreams.push_back(std::move(message));
         _sendStreams.back().adopt(&stream);
     }
     else
@@ -2945,7 +2946,7 @@ Ice::ConnectionI::sendMessage(OutgoingMessage& message)
             return status;
         }
 
-        _sendStreams.push_back(message);
+        _sendStreams.push_back(std::move(message));
         _sendStreams.back().adopt(nullptr); // Adopt the stream.
 #ifdef ICE_HAS_BZIP2
     }
@@ -3313,7 +3314,7 @@ Ice::ConnectionI::parseMessage(int32_t& upcallCount, function<bool(InputStream&)
 
                 if (q != _asyncRequests.end())
                 {
-                    auto outAsync = q->second;
+                    auto outAsync = std::move(q->second);
 
                     if (q == _asyncRequestsHint)
                     {
@@ -3453,9 +3454,10 @@ Ice::ConnectionI::dispatchAll(
             {
                 // Received request on a connection without an object adapter.
                 sendResponse(
-                    makeOutgoingResponse(
+                    makeOutgoingResponseCore(
                         make_exception_ptr(ObjectNotExistException{__FILE__, __LINE__}),
-                        request.current()),
+                        request.current(),
+                        _instance.get()),
                     0);
             }
 
