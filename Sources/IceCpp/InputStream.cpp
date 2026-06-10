@@ -384,14 +384,19 @@ Ice::InputStream::readAndCheckSeqSize(int minSize)
     // the estimated remaining buffer size. This estimation is based on
     // the minimum size of the enclosing sequences, it's _minSeqSize.
     //
-    if(_startSeq == -1 || i > (b.begin() + _startSeq + _minSeqSize))
+    // 'sz' is peer-controlled (up to INT32_MAX), so we compute the minimum size of this sequence in
+    // 64-bit: 'sz * minSize' would otherwise overflow a 32-bit int and bypass the bounds check below.
+    Long minSeqSize = static_cast<Long>(sz) * minSize;
+
+    // '_startSeq + _minSeqSize' does not overflow: on the previous call, the bounds check below
+    // established this sum is <= b.size(), itself smaller than INT32_MAX.
+    if(_startSeq == -1 || (i - b.begin()) > _startSeq + _minSeqSize)
     {
         _startSeq = static_cast<int>(i - b.begin());
-        _minSeqSize = sz * minSize;
     }
     else
     {
-        _minSeqSize += sz * minSize;
+        minSeqSize += _minSeqSize;
     }
 
     //
@@ -399,10 +404,13 @@ Ice::InputStream::readAndCheckSeqSize(int minSize)
     // possibly enclosed sequences), something is wrong with the marshalled
     // data: it's claiming having more data that what is possible to read.
     //
-    if(_startSeq + _minSeqSize > static_cast<int>(b.size()))
+    if(_startSeq + minSeqSize > static_cast<Long>(b.size()))
     {
         throw UnmarshalOutOfBoundsException(__FILE__, __LINE__);
     }
+
+    // minSeqSize is now known to be <= b.size(), itself smaller than INT32_MAX.
+    _minSeqSize = static_cast<int>(minSeqSize);
 
     return sz;
 }
@@ -2435,7 +2443,11 @@ Ice::InputStream::EncapsDecoder11::startSlice()
     if(_current->sliceFlags & FLAG_HAS_SLICE_SIZE)
     {
         _stream->read(_current->sliceSize);
-        if(_current->sliceSize < 4)
+        // A slice with optional members carries at least the 1-byte end marker in its body, so its
+        // size (which includes the 4-byte size field) must be >= 5. We rely on this in skipSlice's
+        // slice-preservation logic, which excludes the end marker by stepping back one byte.
+        Ice::Int minSliceSize = (_current->sliceFlags & FLAG_HAS_OPTIONAL_MEMBERS) ? 5 : 4;
+        if(_current->sliceSize < minSliceSize)
         {
             throw UnmarshalOutOfBoundsException(__FILE__, __LINE__);
         }
