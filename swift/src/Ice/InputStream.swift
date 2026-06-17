@@ -156,21 +156,6 @@ public final class InputStream {
         return encoding
     }
 
-    /// Skips over an encapsulation.
-    ///
-    /// - Returns: The encoding version of the skipped encapsulation.
-    func skipEncapsulation() throws -> EncodingVersion {
-        let sz: Int32 = try read()
-
-        if sz < 6 {
-            throw MarshalException("invalid encapsulation size")
-        }
-
-        let encodingVersion: EncodingVersion = try read()
-        try changePos(offset: Int(sz) - 6)
-        return encodingVersion
-    }
-
     /// Reads the start of a class instance or exception slice.
     public func startSlice() throws {
         precondition(encaps.decoder != nil)
@@ -231,7 +216,11 @@ public final class InputStream {
         case .VSize:
             try skip(readSize())
         case .FSize:
-            try skip(read())
+            let sz: Int32 = try read()
+            if sz < 0 {
+                throw MarshalException("invalid negative size for optional field")
+            }
+            try skip(sz)
         case .Class:
             throw MarshalException("cannot skip an optional class")
         }
@@ -264,12 +253,6 @@ public final class InputStream {
         }
     }
 
-    // Reset the InputStream to prepare for retry
-    func startOver() {
-        pos = 0
-        encaps = nil
-    }
-
     private func changePos(offset: Int) throws {
         precondition(pos + offset >= 0, "Negative position")
 
@@ -291,6 +274,7 @@ public final class InputStream {
     ///
     /// - Parameter count: The number of bytes to skip.
     public func skip(_ count: Int32) throws {
+        precondition(count >= 0, "skip count is negative")
         try changePos(offset: Int(count))
     }
 
@@ -681,13 +665,13 @@ extension InputStream {
                 return try read()
             } else if enumMaxValue < 32767 {
                 let v: Int16 = try read()
-                guard v <= UInt8.max else {
+                guard 0 <= v && v <= UInt8.max else {
                     throw MarshalException("unexpected enumerator value")
                 }
                 return UInt8(v)
             } else {
                 let v: Int32 = try read()
-                guard v <= UInt8.max else {
+                guard 0 <= v && v <= UInt8.max else {
                     throw MarshalException("unexpected enumerator value")
                 }
                 return UInt8(v)
