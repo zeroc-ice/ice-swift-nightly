@@ -720,6 +720,16 @@ IceInternal::compareAddress(const Address& addr1, const Address& addr2)
         {
             return 1;
         }
+
+        // Distinguish scoped link-local addresses such as fe80::1%eth0 and fe80::1%eth1.
+        if (addr1.saIn6.sin6_scope_id < addr2.saIn6.sin6_scope_id)
+        {
+            return -1;
+        }
+        else if (addr2.saIn6.sin6_scope_id < addr1.saIn6.sin6_scope_id)
+        {
+            return 1;
+        }
     }
 
     return 0;
@@ -814,7 +824,15 @@ IceInternal::addrToString(const Address& addr)
     if (isAddressValid(addr))
     {
         ostringstream s;
-        s << inetAddrToString(addr) << ':' << getPort(addr);
+        // An IPv6 address is enclosed in square brackets in the host:port form, e.g. [::1]:4061.
+        if (addr.saStorage.ss_family == AF_INET6)
+        {
+            s << '[' << inetAddrToString(addr) << "]:" << getPort(addr);
+        }
+        else
+        {
+            s << inetAddrToString(addr) << ':' << getPort(addr);
+        }
         return s.str();
     }
     else
@@ -1237,35 +1255,50 @@ IceInternal::getRecvBufferSize(SOCKET fd)
 void
 IceInternal::setMcastGroup(SOCKET fd, const Address& group, const string& intf)
 {
-    vector<string> interfaces = getInterfacesForMulticast(intf, getProtocolSupport(group));
-    set<int> indexes;
-    for (const auto& interface : interfaces)
+    try
     {
-        int rc = 0;
-        if (group.saStorage.ss_family == AF_INET)
+        vector<string> interfaces = getInterfacesForMulticast(intf, getProtocolSupport(group));
+        set<int> indexes;
+        for (const auto& interface : interfaces)
         {
-            struct ip_mreq mreq;
-            mreq.imr_multiaddr = group.saIn.sin_addr;
-            mreq.imr_interface = getInterfaceAddress(interface);
-            rc = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<char*>(&mreq), int(sizeof(mreq)));
-        }
-        else
-        {
-            int index = getInterfaceIndex(interface);
-            if (indexes.find(index) == indexes.end()) // Don't join twice the same interface (if it has multiple IPs)
+            int rc = 0;
+            if (group.saStorage.ss_family == AF_INET)
             {
-                indexes.insert(index);
-                struct ipv6_mreq mreq;
-                mreq.ipv6mr_multiaddr = group.saIn6.sin6_addr;
-                mreq.ipv6mr_interface = static_cast<unsigned int>(index);
-                rc = setsockopt(fd, IPPROTO_IPV6, IPV6_JOIN_GROUP, reinterpret_cast<char*>(&mreq), int(sizeof(mreq)));
+                struct ip_mreq mreq;
+                mreq.imr_multiaddr = group.saIn.sin_addr;
+                mreq.imr_interface = getInterfaceAddress(interface);
+                rc = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, reinterpret_cast<char*>(&mreq), int(sizeof(mreq)));
+            }
+            else
+            {
+                int index = getInterfaceIndex(interface);
+                // Don't join twice the same interface (if it has multiple IPs).
+                if (indexes.find(index) == indexes.end())
+                {
+                    indexes.insert(index);
+                    struct ipv6_mreq mreq;
+                    mreq.ipv6mr_multiaddr = group.saIn6.sin6_addr;
+                    mreq.ipv6mr_interface = static_cast<unsigned int>(index);
+                    rc = setsockopt(
+                        fd,
+                        IPPROTO_IPV6,
+                        IPV6_JOIN_GROUP,
+                        reinterpret_cast<char*>(&mreq),
+                        int(sizeof(mreq)));
+                }
+            }
+            if (rc == SOCKET_ERROR)
+            {
+                throw SocketException(__FILE__, __LINE__, getSocketErrno());
             }
         }
-        if (rc == SOCKET_ERROR)
-        {
-            closeSocketNoThrow(fd);
-            throw SocketException(__FILE__, __LINE__, getSocketErrno());
-        }
+    }
+    catch (...)
+    {
+        // Close the socket on any failure (interface resolution or the multicast join) so this helper always
+        // leaves the socket closed when it throws, like doBind and setReuseAddress.
+        closeSocketNoThrow(fd);
+        throw;
     }
 }
 
@@ -1273,15 +1306,29 @@ void
 IceInternal::setMcastInterface(SOCKET fd, const string& intf, const Address& addr)
 {
     int rc;
-    if (addr.saStorage.ss_family == AF_INET)
+    try
     {
-        struct in_addr iface = getInterfaceAddress(intf);
-        rc = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<char*>(&iface), int(sizeof(iface)));
+        if (addr.saStorage.ss_family == AF_INET)
+        {
+            struct in_addr iface = getInterfaceAddress(intf);
+            rc = setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, reinterpret_cast<char*>(&iface), int(sizeof(iface)));
+        }
+        else
+        {
+            int interfaceNum = getInterfaceIndex(intf);
+            rc = setsockopt(
+                fd,
+                IPPROTO_IPV6,
+                IPV6_MULTICAST_IF,
+                reinterpret_cast<char*>(&interfaceNum),
+                int(sizeof(int)));
+        }
     }
-    else
+    catch (const Ice::SocketException&)
     {
-        int interfaceNum = getInterfaceIndex(intf);
-        rc = setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, reinterpret_cast<char*>(&interfaceNum), int(sizeof(int)));
+        // getInterfaceAddress and getInterfaceIndex throw if the interface cannot be resolved.
+        closeSocketNoThrow(fd);
+        throw;
     }
     if (rc == SOCKET_ERROR)
     {
@@ -1903,8 +1950,9 @@ IceInternal::isLoopbackOrMulticastAddress(const string& name)
         in6_addr addr6;
         if (inet_pton(AF_INET, name.c_str(), &addr) > 0)
         {
-            // It's an IPv4 address
-            return addr.s_addr == htonl(INADDR_LOOPBACK) || IN_MULTICAST(ntohl(addr.s_addr));
+            // It's an IPv4 address. The whole 127.0.0.0/8 range is loopback, not just 127.0.0.1.
+            const uint32_t host = ntohl(addr.s_addr);
+            return (host & 0xFF000000u) == 0x7F000000u || IN_MULTICAST(host);
         }
         else if (inet_pton(AF_INET6, name.c_str(), &addr6) > 0)
         {

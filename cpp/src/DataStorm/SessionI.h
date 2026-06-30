@@ -289,6 +289,11 @@ namespace DataStormI
         [[nodiscard]] bool retry(DataStormContract::NodePrx, std::exception_ptr);
         void destroyImpl(const std::exception_ptr&);
 
+        // Cancels and clears any pending retry task, breaking the _retryTask -> task -> lambda -> self reference
+        // cycle so the session can be reclaimed. Used by NodeI::destroy, which drops sessions without calling
+        // destroyImpl. Safe to call when no retry is pending.
+        void cancelRetryTask();
+
         [[nodiscard]] const std::string& getId() const { return _id; }
 
         [[nodiscard]] Ice::ConnectionPtr getConnection() const;
@@ -328,15 +333,16 @@ namespace DataStormI
         void unsubscribeFromFilter(std::int64_t, std::int64_t, const std::shared_ptr<DataElementI>&);
         void disconnectFromFilter(std::int64_t, std::int64_t, const std::shared_ptr<DataElementI>&);
 
-        /// Retrieves a map of the last sample IDs read by a data element for a specified topic and key.
+        /// Retrieves a map of the last sample IDs read by a data element for a specified topic and key or filter.
         ///
         /// @param topic The unique identifier of the topic.
-        /// @param key The unique identifier of the ke.
+        /// @param keyOrFilterId The id of the remote key or filter being attached: a key id when positive, or the
+        /// negated filter id when negative.
         /// @param element The data element for which the last sample IDs are retrieved.
         /// @return A map where the key represents the remote element ID, and the value represents the last sample ID
         /// read by the specified data element.
         [[nodiscard]] DataStormContract::LongLongDict
-        getLastIds(std::int64_t topic, std::int64_t key, const std::shared_ptr<DataElementI>& element);
+        getLastIds(std::int64_t topic, std::int64_t keyOrFilterId, const std::shared_ptr<DataElementI>& element);
 
         [[nodiscard]] std::vector<std::shared_ptr<Sample>> subscriberInitialized(
             std::int64_t,

@@ -69,36 +69,49 @@ IceInternal::UdpTransceiver::closing(bool, exception_ptr)
 void
 IceInternal::UdpTransceiver::close()
 {
-    assert(_fd != INVALID_SOCKET);
-    SOCKET fd = _fd;
-    _fd = INVALID_SOCKET;
-    closeSocket(fd);
+    // _fd can be INVALID_SOCKET when bind failed: the bind/setup helper that threw already closed the socket, and
+    // bind()'s catch reset _fd.
+    if (_fd != INVALID_SOCKET)
+    {
+        closeSocketNoThrow(_fd);
+        _fd = INVALID_SOCKET;
+    }
 }
 
 EndpointIPtr
 IceInternal::UdpTransceiver::bind()
 {
-    if (isMulticast(_addr))
+    try
     {
-        // Set SO_REUSEADDR socket option to allow multiple sockets to bind to the same multicast address.
-        setReuseAddress(_fd, true);
-        _mcastAddr = _addr;
+        if (isMulticast(_addr))
+        {
+            // Set SO_REUSEADDR socket option to allow multiple sockets to bind to the same multicast address.
+            setReuseAddress(_fd, true);
+            _mcastAddr = _addr;
 
 #ifdef _WIN32
-        // Windows does not allow binding to the mcast address itself so we bind to INADDR_ANY instead.
-        const_cast<Address&>(_addr) = getAddressForServer("", _port, getProtocolSupport(_addr), false, false);
+            // Windows does not allow binding to the mcast address itself so we bind to INADDR_ANY instead.
+            const_cast<Address&>(_addr) = getAddressForServer("", _port, getProtocolSupport(_addr), false, false);
 #endif
 
-        const_cast<Address&>(_addr) = doBind(_fd, _addr, _mcastInterface);
-        if (getPort(_mcastAddr) == 0)
-        {
-            setPort(_mcastAddr, getPort(_addr));
+            const_cast<Address&>(_addr) = doBind(_fd, _addr, _mcastInterface);
+            if (getPort(_mcastAddr) == 0)
+            {
+                setPort(_mcastAddr, getPort(_addr));
+            }
+            setMcastGroup(_fd, _mcastAddr, _mcastInterface);
         }
-        setMcastGroup(_fd, _mcastAddr, _mcastInterface);
+        else
+        {
+            const_cast<Address&>(_addr) = doBind(_fd, _addr);
+        }
     }
-    else
+    catch (...)
     {
-        const_cast<Address&>(_addr) = doBind(_fd, _addr);
+        // setReuseAddress/doBind/setMcastGroup close the socket before throwing, so reset _fd to avoid a double
+        // close when close() runs during cleanup. Mirrors TcpAcceptor::listen.
+        _fd = INVALID_SOCKET;
+        throw;
     }
 
     _bound = true;
@@ -172,6 +185,18 @@ repeat:
         {
             return SocketOperationWrite;
         }
+
+#ifndef _WIN32
+        // ENOBUFS means the local send buffer is momentarily full. This is routine on macOS/BSD during bursts
+        // and is a transient local condition rather than a connection failure. UDP is best-effort, so drop this
+        // datagram instead of throwing (throwing would needlessly close the connection). Limited to non-Windows:
+        // there noBuffers() also matches WSAEFAULT, which must not be silently dropped.
+        if (noBuffers())
+        {
+            buf.i = buf.b.end();
+            return SocketOperationNone;
+        }
+#endif
 
         throw SocketException(__FILE__, __LINE__, getSocketErrno());
     }
@@ -716,7 +741,17 @@ IceInternal::UdpTransceiver::setBufSize(int rcvSize, int sndSize)
         //
         if (sizeRequested == -1)
         {
-            sizeRequested = _instance->properties()->getPropertyAsIntWithDefault(prop, dfltSize);
+            try
+            {
+                sizeRequested = _instance->properties()->getPropertyAsIntWithDefault(prop, dfltSize);
+            }
+            catch (const Ice::PropertyException&)
+            {
+                // getPropertyAsIntWithDefault throws if the property is set to a non-integer value.
+                closeSocketNoThrow(_fd);
+                _fd = INVALID_SOCKET;
+                throw;
+            }
         }
         //
         // Check for sanity.
