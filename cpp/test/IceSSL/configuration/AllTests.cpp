@@ -393,6 +393,33 @@ testCertificateVerification(
     }
     fact->destroyServer(server);
 
+    // Test IceSSL.VerifyPeer=1 with an IceSSL.TrustOnly rule. The connection is rejected because a client without
+    // a certificate cannot match the trust rule.
+    d = createServerProps(defaultProps, p12, "ca1/server", "");
+    d["IceSSL.VerifyPeer"] = "1";
+    d["IceSSL.TrustOnly"] = "C=US, ST=Florida, O=ZeroC,"
+                            "OU=Ice test infrastructure, emailAddress=info@zeroc.com, CN=ca1.client";
+    server = fact->createServer(d);
+    try
+    {
+        server->ice_ping();
+        test(false);
+    }
+    catch (const ProtocolException&)
+    {
+        // Expected, if reported as an SSL alert by the server.
+    }
+    catch (const ConnectionLostException&)
+    {
+        // Expected.
+    }
+    catch (const LocalException& ex)
+    {
+        cerr << ex << endl;
+        test(false);
+    }
+    fact->destroyServer(server);
+
     // Test IceSSL.VerifyPeer=2. This should fail because the client does not supply a certificate.
     d = createServerProps(defaultProps, p12, "ca1/server", "");
     d["IceSSL.VerifyPeer"] = "2";
@@ -1181,6 +1208,44 @@ void
 testCAsDirectory(const string&, const string&, const Ice::PropertiesPtr&, bool)
 {
     // Not supported with Schannel and SecureTransport.
+}
+#endif
+
+#ifdef ICE_USE_OPENSSL
+void
+testEncryptedKey(const string& factoryRef, const Ice::PropertiesPtr& defaultProps)
+{
+    cout << "testing IceSSL.Password with an encrypted PEM key... " << flush;
+    InitializationData initData;
+    initData.properties = createClientProps(defaultProps, false, "", "ca1/ca1");
+    CommunicatorPtr comm = initialize(initData);
+    Test::ServerFactoryPrx fact{comm, factoryRef};
+
+    // The server's private key is stored in an encrypted PEM file; IceSSL.Password must be used to load it.
+    Test::Properties d = createServerProps(defaultProps, false, "", "");
+    d["IceSSL.CertFile"] = "ca1/server_cert.pem";
+    d["IceSSL.KeyFile"] = "ca1/server_encrypted_key.pem";
+    d["IceSSL.Password"] = "password";
+    d["IceSSL.VerifyPeer"] = "0";
+    optional<Test::ServerPrx> server = fact->createServer(d);
+    try
+    {
+        server->ice_ping();
+    }
+    catch (const LocalException& ex)
+    {
+        cerr << ex << endl;
+        test(false);
+    }
+    fact->destroyServer(server);
+    comm->destroy();
+    cout << "ok" << endl;
+}
+#else
+void
+testEncryptedKey(const string&, const Ice::PropertiesPtr&)
+{
+    // Encrypted PEM private keys with IceSSL.Password are only supported with OpenSSL.
 }
 #endif
 
@@ -2363,6 +2428,7 @@ allTests(Test::TestHelper* helper, const string& defaultDir, bool p12)
     testNotYerValidCert(factory, defaultProps, p12);
     testCertificateChains(factory, defaultDir, defaultProps, p12);
     testCAsDirectory(factory, defaultDir, defaultProps, p12);
+    testEncryptedKey(factory, defaultProps);
     testMutlipleCACerts(factory, defaultProps, p12);
     testDerCertificates(factory, defaultProps, p12);
     testTrustOnly(factory, defaultProps, p12);

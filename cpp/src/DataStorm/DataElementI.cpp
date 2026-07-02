@@ -228,8 +228,8 @@ DataElementI::attachKey(
 
     if (_onConnectedElements && added)
     {
-        _executor->queue([self = shared_from_this(), name]
-                         { self->_onConnectedElements(DataStorm::CallbackReason::Connect, name); });
+        _executor->queue([callback = _onConnectedElements, name]
+                         { callback(DataStorm::CallbackReason::Connect, name); });
     }
 
     if (addConnectedKey(key, subscriber))
@@ -286,9 +286,8 @@ DataElementI::detachKey(
         {
             if (_onConnectedElements)
             {
-                _executor->queue(
-                    [self = shared_from_this(), subscriber]
-                    { self->_onConnectedElements(DataStorm::CallbackReason::Disconnect, subscriber->name); });
+                _executor->queue([callback = _onConnectedElements, subscriber]
+                                 { callback(DataStorm::CallbackReason::Disconnect, subscriber->name); });
             }
             if (p->second.remove(topicId, elementId))
             {
@@ -347,8 +346,8 @@ DataElementI::attachFilter(
     auto subscriber = p->second.addOrGet(topicId, filterId, subscriberId, filter, sampleFilter, name, priority, added);
     if (_onConnectedElements && added)
     {
-        _executor->queue([self = shared_from_this(), name]
-                         { self->_onConnectedElements(DataStorm::CallbackReason::Connect, name); });
+        _executor->queue([callback = _onConnectedElements, name]
+                         { callback(DataStorm::CallbackReason::Connect, name); });
     }
 
     if (addConnectedKey(key, subscriber))
@@ -406,9 +405,8 @@ DataElementI::detachFilter(
         {
             if (_onConnectedElements)
             {
-                _executor->queue(
-                    [self = shared_from_this(), subscriber]
-                    { self->_onConnectedElements(DataStorm::CallbackReason::Disconnect, subscriber->name); });
+                _executor->queue([callback = _onConnectedElements, subscriber]
+                                 { callback(DataStorm::CallbackReason::Disconnect, subscriber->name); });
             }
             if (p->second.remove(topicId, filterId))
             {
@@ -587,8 +585,7 @@ DataElementI::addConnectedKey(const shared_ptr<Key>& key, const shared_ptr<Subsc
     {
         if (key && subscribers.empty() && _onConnectedKeys)
         {
-            _executor->queue([self = shared_from_this(), key]
-                             { self->_onConnectedKeys(DataStorm::CallbackReason::Connect, key); });
+            _executor->queue([callback = _onConnectedKeys, key] { callback(DataStorm::CallbackReason::Connect, key); });
         }
         subscribers.push_back(subscriber);
         return true;
@@ -608,8 +605,8 @@ DataElementI::removeConnectedKey(const shared_ptr<Key>& key, const shared_ptr<Su
         {
             if (key && _onConnectedKeys)
             {
-                _executor->queue([self = shared_from_this(), key]
-                                 { self->_onConnectedKeys(DataStorm::CallbackReason::Disconnect, key); });
+                _executor->queue([callback = _onConnectedKeys, key]
+                                 { callback(DataStorm::CallbackReason::Disconnect, key); });
             }
             _connectedKeys.erase(key);
         }
@@ -753,7 +750,8 @@ DataReaderI::initSamples(
     }
 
     vector<shared_ptr<Sample>> valid;
-    shared_ptr<Sample> previous = _last;
+    // Resolve partial updates against the previous sample of the SAME key.
+    map<shared_ptr<Key>, shared_ptr<Sample>> previousByKey = _lastByKey;
     for (const auto& sample : samples)
     {
         if (checkKey && !matchKey(sample->key))
@@ -767,7 +765,7 @@ DataReaderI::initSamples(
         //   publishers for the same key. The subscriber list is sorted by priority in addConnectedKey.
         if ((_discardPolicy == DataStorm::DiscardPolicy::SendTime && sample->timestamp <= _lastSendTime) ||
             (_discardPolicy == DataStorm::DiscardPolicy::Priority &&
-             priority < _connectedKeys[sample->key].back()->priority))
+             hasLowerPriorityThanConnected(priority, sample->key)))
         {
             continue;
         }
@@ -779,14 +777,18 @@ DataReaderI::initSamples(
         {
             if (sample->event == DataStorm::SampleEvent::PartialUpdate)
             {
-                _parent->getUpdater(sample->tag)(previous, sample, _parent->instance()->getCommunicator());
+                auto p = previousByKey.find(sample->key);
+                _parent->getUpdater(sample->tag)(
+                    p == previousByKey.end() ? nullptr : p->second,
+                    sample,
+                    _parent->instance()->getCommunicator());
             }
             else
             {
                 sample->decode(_parent->instance()->getCommunicator());
             }
         }
-        previous = sample;
+        previousByKey[sample->key] = sample;
     }
 
     if (_traceLevels->data > 2 && valid.size() < samples.size())
@@ -799,11 +801,11 @@ DataReaderI::initSamples(
     if (_onSamples)
     {
         _executor->queue(
-            [self = static_pointer_cast<DataReaderI>(shared_from_this()), valid]
+            [callback = _onSamples, valid]
             {
                 for (const auto& s : valid)
                 {
-                    self->_onSamples(s);
+                    callback(s);
                 }
             });
     }
@@ -863,7 +865,7 @@ DataReaderI::initSamples(
         }
     }
     assert(!_samples.empty());
-    _last = _samples.back();
+    _lastByKey = std::move(previousByKey);
     _parent->_cond.notify_all();
 }
 
@@ -906,8 +908,7 @@ DataReaderI::queue(
     // - Priority: discard samples from publisher with lower priority than the highest priority among the connected
     //   publishers for the same key. The subscriber list is sorted by priority in addConnectedKey.
     if ((_discardPolicy == DataStorm::DiscardPolicy::SendTime && sample->timestamp <= _lastSendTime) ||
-        (_discardPolicy == DataStorm::DiscardPolicy::Priority &&
-         priority < _connectedKeys[sample->key].back()->priority))
+        (_discardPolicy == DataStorm::DiscardPolicy::Priority && hasLowerPriorityThanConnected(priority, sample->key)))
     {
         if (_traceLevels->data > 2)
         {
@@ -921,7 +922,11 @@ DataReaderI::queue(
     {
         if (sample->event == DataStorm::SampleEvent::PartialUpdate)
         {
-            _parent->getUpdater(sample->tag)(_last, sample, _parent->instance()->getCommunicator());
+            auto p = _lastByKey.find(sample->key);
+            _parent->getUpdater(sample->tag)(
+                p == _lastByKey.end() ? nullptr : p->second,
+                sample,
+                _parent->instance()->getCommunicator());
         }
         else
         {
@@ -932,8 +937,7 @@ DataReaderI::queue(
 
     if (_onSamples)
     {
-        _executor->queue([self = static_pointer_cast<DataReaderI>(shared_from_this()), sample]
-                         { self->_onSamples(sample); });
+        _executor->queue([callback = _onSamples, sample] { callback(sample); });
     }
 
     if (_config->sampleLifetime && *_config->sampleLifetime > 0)
@@ -972,7 +976,7 @@ DataReaderI::queue(
         _samples.clear();
     }
     _samples.push_back(sample);
-    _last = sample;
+    _lastByKey[sample->key] = sample;
     _parent->_cond.notify_all();
 }
 
@@ -1012,6 +1016,25 @@ DataReaderI::addConnectedKey(const shared_ptr<Key>& key, const shared_ptr<Subscr
     }
 }
 
+bool
+DataReaderI::hasLowerPriorityThanConnected(int priority, const shared_ptr<Key>& key) const
+{
+    // The connected publishers that can deliver this key are registered under the key itself (a keyed peer) and under
+    // the null key (a filter or any-key peer, which delivers every key). The threshold is the highest priority across
+    // both; each list is sorted ascending in addConnectedKey, so back() is the highest. With no connected publishers
+    // the threshold stays at the sample's own priority, so the function returns false.
+    int threshold = priority;
+    for (const auto& k : {key, shared_ptr<Key>{}})
+    {
+        auto p = _connectedKeys.find(k);
+        if (p != _connectedKeys.end() && !p->second.empty())
+        {
+            threshold = std::max(threshold, p->second.back()->priority);
+        }
+    }
+    return priority < threshold;
+}
+
 DataWriterI::DataWriterI(TopicWriterI* topic, string name, int64_t id, const DataStorm::WriterConfig& config)
     : DataElementI(topic, std::move(name), id, config),
       _parent(topic),
@@ -1027,7 +1050,9 @@ DataWriterI::publish(const shared_ptr<Key>& key, const shared_ptr<Sample>& sampl
     if (sample->event == DataStorm::SampleEvent::PartialUpdate)
     {
         assert(!sample->hasValue());
-        _parent->getUpdater(sample->tag)(_last, sample, _parent->instance()->getCommunicator());
+        auto p = _lastByKey.find(key);
+        _parent->getUpdater(
+            sample->tag)(p == _lastByKey.end() ? nullptr : p->second, sample, _parent->instance()->getCommunicator());
     }
 
     sample->id = ++_parent->_nextSampleId;
@@ -1071,7 +1096,7 @@ DataWriterI::publish(const shared_ptr<Key>& key, const shared_ptr<Sample>& sampl
     }
     assert(sample->key);
     _samples.push_back(sample);
-    _last = sample;
+    _lastByKey[key] = sample;
 }
 
 KeyDataReaderI::KeyDataReaderI(

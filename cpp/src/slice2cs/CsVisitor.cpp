@@ -1,6 +1,7 @@
 // Copyright (c) ZeroC, Inc.
 
 #include "CsVisitor.h"
+#include "../Slice/Util.h"
 #include "CsUtil.h"
 
 #include <cassert>
@@ -60,7 +61,8 @@ Slice::CsVisitor::emitObsoleteAttribute(const ContainedPtr& p)
     {
         if (auto reason = p->getDeprecationReason())
         {
-            _out << nl << "[global::System.Obsolete(\"" << *reason << "\")]";
+            const string escapedReason = toStringLiteral(*reason, "\a\b\f\n\r\t\v\0", "", UCN, 0);
+            _out << nl << "[global::System.Obsolete(\"" << escapedReason << "\")]";
         }
         else
         {
@@ -73,7 +75,7 @@ void
 Slice::CsVisitor::namespacePrefixStart(const ModulePtr& p)
 {
     string ns = getNamespacePrefix(p);
-    if (!ns.empty())
+    if (p->isTopLevel() && !ns.empty())
     {
         _out << sp;
         _out << nl << "namespace " << ns;
@@ -84,7 +86,7 @@ Slice::CsVisitor::namespacePrefixStart(const ModulePtr& p)
 void
 Slice::CsVisitor::namespacePrefixEnd(const ModulePtr& p)
 {
-    if (!getNamespacePrefix(p).empty())
+    if (p->isTopLevel() && !getNamespacePrefix(p).empty())
     {
         _out << eb;
     }

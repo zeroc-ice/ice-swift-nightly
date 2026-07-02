@@ -146,7 +146,6 @@ namespace Ice
         void close(std::function<void()> response, std::function<void(std::exception_ptr)> exception) noexcept final;
 
         [[nodiscard]] bool isActiveOrHolding() const;
-        [[nodiscard]] bool isFinished() const;
 
         void throwException() const final; // From Connection. Throws the connection exception if destroyed.
 
@@ -208,8 +207,6 @@ namespace Ice
         [[nodiscard]] ConnectionInfoPtr getInfo() const final;        // From Connection
 
         void setBufferSize(std::int32_t rcvSize, std::int32_t sndSize) final; // From Connection
-
-        void exception(std::exception_ptr);
 
         // This method is called to execute user code (connection start completion callback, invocation sent callbacks,
         // or an upcall issued from an incoming message). The invocation sent callbacks and the message upcall might

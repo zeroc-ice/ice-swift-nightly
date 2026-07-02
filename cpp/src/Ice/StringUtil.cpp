@@ -337,6 +337,7 @@ namespace
     // end marks the one-past-the-end position of the substring to be scanned.
     // nextStart is set to the index of the first character following the decoded
     // character or escape sequence.
+    // Returns true if the decoded character is pure ASCII (<= 127), false otherwise.
     //
     bool decodeChar(
         const string& s,
@@ -617,7 +618,7 @@ IceInternal::unescapeString(
         result.reserve(end - start);
         while (start < end)
         {
-            if (decodeChar(*inputStringPtr, start, end, start, special, result))
+            if (!decodeChar(*inputStringPtr, start, end, start, special, result))
             {
                 resultIsPureASCII = false;
             }
@@ -801,7 +802,7 @@ IceInternal::match(const string& s, const string& pat, bool emptyMatch)
     //
     // Make sure end of the strings match
     //
-    if (s.substr(endIndex, s.length()) != pat.substr(beginIndex + 1, pat.length()))
+    if (s.substr(endIndex) != pat.substr(beginIndex + 1))
     {
         return false;
     }

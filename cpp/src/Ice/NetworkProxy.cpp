@@ -142,7 +142,7 @@ SOCKSNetworkProxy::finish(Buffer& readBuffer, Buffer&)
         throw Ice::ConnectFailedException{
             __FILE__,
             __LINE__,
-            "connection establishment failed due to an HTTP proxy error"};
+            "connection establishment failed due to a SOCKS4 proxy error"};
     }
 }
 
@@ -224,7 +224,12 @@ HTTPNetworkProxy::endRead(Buffer& buf)
     // reading otherwise we're done.
     //
     const byte* end = HttpParser().isCompleteMessage(buf.b.begin(), buf.i);
-    if (!end && buf.i == buf.b.end())
+    if (end)
+    {
+        return SocketOperationNone;
+    }
+
+    if (buf.i == buf.b.end())
     {
         //
         // Read one more byte, we can't easily read bytes in advance
@@ -235,16 +240,22 @@ HTTPNetworkProxy::endRead(Buffer& buf)
         //
         buf.b.resize(buf.b.size() + 1);
         buf.i = buf.b.begin() + buf.b.size() - 1;
-        return SocketOperationRead;
     }
-    return SocketOperationNone;
+    return SocketOperationRead;
 }
 
 void
 HTTPNetworkProxy::finish(Buffer& readBuffer, Buffer&)
 {
     HttpParser parser;
-    parser.parse(readBuffer.b.begin(), readBuffer.b.end());
+    try
+    {
+        parser.parse(readBuffer.b.begin(), readBuffer.b.end());
+    }
+    catch (const WebSocketException& ex)
+    {
+        throw Ice::ProtocolException{__FILE__, __LINE__, "malformed HTTP proxy response: " + ex.reason};
+    }
     if (parser.status() != 200)
     {
         throw Ice::ConnectFailedException{

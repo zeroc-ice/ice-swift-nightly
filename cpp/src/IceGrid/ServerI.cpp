@@ -347,7 +347,7 @@ namespace IceGrid
             string variable;
             if (v[beg + 1] == '{')
             {
-                end = v.find('}');
+                end = v.find('}', beg);
                 if (end == string::npos)
                 {
                     break;
@@ -1138,13 +1138,8 @@ ServerI::load(
         }
         else if (response)
         {
-            AdapterPrxDict adapters;
-            for (const auto& [id, servant] : _adapters)
-            {
-                adapters.insert({id, servant->getProxy()});
-            }
             assert(_this);
-            response(*_this, adapters, secondsToInt(_activationTimeout), secondsToInt(_deactivationTimeout));
+            response(*_this, getAdapterProxies(), secondsToInt(_activationTimeout), secondsToInt(_deactivationTimeout));
         }
         return nullptr;
     }
@@ -1193,20 +1188,30 @@ ServerI::load(
             // the server proxy to register the server process proxy
             // with the node.
             //
-            AdapterPrxDict adapters;
-            for (const auto& adapter : _adapters)
-            {
-                adapters.insert({adapter.first, adapter.second->getProxy()});
-            }
             assert(_this);
-            response(*_this, adapters, secondsToInt(_activationTimeout), secondsToInt(_deactivationTimeout));
+            response(*_this, getAdapterProxies(), secondsToInt(_activationTimeout), secondsToInt(_deactivationTimeout));
         }
         else if (_state == InternalServerState::Active)
         {
-            _load->addCallback(response, exception); // Must be called before startRuntimePropertiesUpdate!
             updateRevision(desc->uuid, desc->revision);
-            assert(_process);
-            _load->startRuntimePropertiesUpdate(*_process);
+            if (_process)
+            {
+                _load->addCallback(response, exception); // Must be called before startRuntimePropertiesUpdate!
+                _load->startRuntimePropertiesUpdate(*_process);
+            }
+            else
+            {
+                //
+                // The server has no process to push runtime properties to (e.g. its Ice.Admin object adapter
+                // is disabled), so there's nothing to update; respond directly.
+                //
+                assert(_this);
+                response(
+                    *_this,
+                    getAdapterProxies(),
+                    secondsToInt(_activationTimeout),
+                    secondsToInt(_deactivationTimeout));
+            }
         }
         else
         {
@@ -1257,18 +1262,6 @@ ServerI::checkUpdate(shared_ptr<InternalServerDescriptor> desc, bool noRestart, 
     }
 
     return StopCommand::isStopped(_state);
-}
-
-void
-ServerI::checkRemove(bool noRestart, const Ice::Current&)
-{
-    lock_guard lock(_mutex);
-    checkDestroyed();
-
-    if (noRestart && !StopCommand::isStopped(_state) && !_stop)
-    {
-        throw DeploymentException("the server is running");
-    }
 }
 
 shared_ptr<ServerCommand>
@@ -1896,13 +1889,7 @@ ServerI::update()
                 _node->addServer(shared_from_this(), _desc->application);
             }
 
-            AdapterPrxDict adapters;
-            for (const auto& adpt : _adapters)
-            {
-                adapters.insert({adpt.first, adpt.second->getProxy()});
-            }
-            assert(_this);
-            _load->finished(*_this, adapters, _activationTimeout, _deactivationTimeout);
+            finishLoad();
         }
         catch (const DeploymentException& ex)
         {
@@ -2073,9 +2060,10 @@ ServerI::updateImpl(const shared_ptr<InternalServerDescriptor>& descriptor)
     }
 
     //
-    // Simplify the log paths and transform relative paths into
-    // absolute paths, also make sure the logs are sorted.
+    // Rebuild the log paths from the descriptor: simplify them, transform relative paths into
+    // absolute paths, and sort the result.
     //
+    _logs.clear();
     for (const auto& log : _desc->logs)
     {
         string path = simplify(log);
@@ -2486,13 +2474,7 @@ ServerI::updateRuntimePropertiesCallback(const shared_ptr<InternalServerDescript
     assert(_process);
     if (_load->finishRuntimePropertiesUpdate(desc, *_process))
     {
-        AdapterPrxDict adapters;
-        for (const auto& [id, servant] : _adapters)
-        {
-            adapters.insert({id, servant->getProxy()});
-        }
-        assert(_this);
-        _load->finished(*_this, adapters, _activationTimeout, _deactivationTimeout);
+        finishLoad();
     }
 }
 
@@ -2512,10 +2494,32 @@ ServerI::updateRuntimePropertiesCallback(exception_ptr ex, const shared_ptr<Inte
     }
 }
 
+AdapterPrxDict
+ServerI::getAdapterProxies() const
+{
+    // Must be called with _mutex held.
+    AdapterPrxDict adapters;
+    for (const auto& [id, servant] : _adapters)
+    {
+        adapters.insert({id, servant->getProxy()});
+    }
+    return adapters;
+}
+
+void
+ServerI::finishLoad()
+{
+    // Must be called with _mutex held.
+    // Completes the pending load command, handing the current server and adapter proxies back to the caller.
+    assert(_load);
+    assert(_this);
+    _load->finished(*_this, getAdapterProxies(), _activationTimeout, _deactivationTimeout);
+}
+
 bool
 ServerI::checkActivation()
 {
-    // assert(locked());
+    // Must be called with _mutex held.
     if (_state == InternalServerState::WaitForActivation || _state == InternalServerState::ActivationTimeout)
     {
         //
@@ -2621,6 +2625,16 @@ ServerI::setStateNoSync(InternalServerState st, const string& reason)
     //
     InternalServerState previous = _state;
     _state = st;
+
+    //
+    // Wake any thread waiting for the server to leave the Activating state (adapterDeactivated() and terminated()).
+    // The successful activation path notifies explicitly in activate(), but the activation-failure path
+    // (Activating -> Deactivating -> Inactive) would otherwise never notify, leaving those waiters parked forever.
+    //
+    if (previous == InternalServerState::Activating && _state != InternalServerState::Activating)
+    {
+        _condVar.notify_all();
+    }
 
     //
     // Check if some commands are done.
@@ -2761,8 +2775,18 @@ ServerI::setStateNoSync(InternalServerState st, const string& reason)
     {
         // If there's a pending load command, it's time to update the runtime properties of the server now that it's
         // active.
-        assert(_process);
-        _load->startRuntimePropertiesUpdate(*_process);
+        if (_process)
+        {
+            _load->startRuntimePropertiesUpdate(*_process);
+        }
+        else
+        {
+            //
+            // The server has no process to update its runtime properties on (e.g. its Ice.Admin object
+            // adapter is disabled), so there's nothing to update; complete the load now.
+            //
+            finishLoad();
+        }
     }
 
     //

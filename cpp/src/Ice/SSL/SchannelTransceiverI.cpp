@@ -136,18 +136,31 @@ Schannel::TransceiverI::sslHandshake(SecBuffer* initialBuffer)
 
         if (_credentials.cCreds > 0)
         {
-            for (DWORD i = 0; i < _credentials.cCreds; ++i)
+            if (!_credentials.paCred)
             {
-                if (!_credentials.paCred[i])
+                throw SecurityException(
+                    __FILE__,
+                    __LINE__,
+                    "SSL transport: the provided SCH_CREDENTIALS sets cCreds but paCred is null.");
+            }
+
+            // The credentials callback transfers ownership of the paCred contexts to the transport (see
+            // ClientAuthenticationOptions / ServerAuthenticationOptions). Record ownership of every context
+            // before validating below, so close() releases the full transferred set even if validation throws
+            // (CertFreeCertificateContext(nullptr) is a no-op). They are released in close().
+            _allCerts.assign(_credentials.paCred, _credentials.paCred + _credentials.cCreds);
+            _credentials.paCred = &_allCerts[0];
+
+            for (PCCERT_CONTEXT certificate : _allCerts)
+            {
+                if (!certificate)
                 {
                     throw SecurityException(
                         __FILE__,
                         __LINE__,
                         "SSL transport: invalid null certificate in the provided SCH_CREDENTIALS.");
                 }
-                _allCerts.push_back(CertDuplicateCertificateContext(_credentials.paCred[i]));
             }
-            _credentials.paCred = &_allCerts[0];
         }
 
         err = AcquireCredentialsHandle(
@@ -197,6 +210,10 @@ Schannel::TransceiverI::sslHandshake(SecBuffer* initialBuffer)
                 0);
             if (err != SEC_E_OK && err != SEC_I_CONTINUE_NEEDED)
             {
+                if (outBuffer.pvBuffer)
+                {
+                    FreeContextBuffer(outBuffer.pvBuffer);
+                }
                 ostringstream os;
                 os << "SSL transport: handshake failure:\n" << IceInternal::errorToString(err);
                 throw SecurityException(__FILE__, __LINE__, os.str());
@@ -295,6 +312,15 @@ Schannel::TransceiverI::sslHandshake(SecBuffer* initialBuffer)
             }
             else if (err != SEC_I_CONTINUE_NEEDED && err != SEC_E_OK)
             {
+                if (outBuffers[0].pvBuffer) // token
+                {
+                    FreeContextBuffer(outBuffers[0].pvBuffer);
+                }
+                if (outBuffers[1].pvBuffer) // alert
+                {
+                    FreeContextBuffer(outBuffers[1].pvBuffer);
+                }
+
                 ostringstream os;
                 os << "SSL handshake failure:\n" << IceInternal::errorToString(err);
                 throw SecurityException(__FILE__, __LINE__, os.str());
@@ -579,7 +605,15 @@ Schannel::TransceiverI::decryptMessage(IceInternal::Buffer& buffer)
                 memcpy(_extraBuffer.i, extraBuffer->pvBuffer, extraBuffer->cbBuffer);
                 _extraBuffer.i += extraBuffer->cbBuffer;
             }
-            return 0;
+            // Unlike the SEC_E_OK path below, we deliberately leave _readBuffer untouched here: sslHandshake resumes
+            // the handshake from the data still buffered in _readBuffer and moves the trailing post-renegotiation
+            // records back to its front, which is how the application data following the renegotiation is recovered.
+            // Resetting _readBuffer.i here would underflow that memmove.
+            // Return the application data already copied into the caller's buffer during this call (it may be non-zero
+            // because earlier records in the same batch were decrypted before this renegotiation request). The caller
+            // must advance buf.i by this amount before performing the re-handshake, otherwise the next decryptMessage
+            // overwrites these bytes and the plaintext is silently lost.
+            return i - buffer.i;
         }
         else if (err == SEC_I_CONTEXT_EXPIRED)
         {
@@ -803,6 +837,9 @@ Schannel::TransceiverI::read(IceInternal::Buffer& buf)
         }
 
         size_t decrypted = decryptMessage(buf);
+        // Account for the bytes decryptMessage copied into buf right away, so a renegotiation in the middle of the
+        // batch does not drop the plaintext already extracted before it.
+        buf.i += decrypted;
         if (_sslConnectionRenegotiating)
         {
             // The peer has requested a renegotiation.
@@ -828,8 +865,6 @@ Schannel::TransceiverI::read(IceInternal::Buffer& buf)
             }
             continue;
         }
-
-        buf.i += decrypted;
     }
     _delegate->getNativeInfo()->ready(
         IceInternal::SocketOperationRead,
@@ -899,10 +934,14 @@ Schannel::TransceiverI::finishRead(IceInternal::Buffer& buf)
     _delegate->finishRead(_readBuffer);
     if (_state == StateHandshakeComplete)
     {
-        size_t decrypted;
-        while (true)
+        std::byte* const start = buf.i;
+        // Decrypt the buffered data into buf, advancing buf.i as we go so that a renegotiation in the middle of the
+        // batch does not drop or overwrite the plaintext already extracted. The loop guard matches decryptMessage's
+        // precondition: there is buffered (_readBuffer) or unprocessed data left to decrypt.
+        while (buf.i != buf.b.end() && (_readBuffer.i != _readBuffer.b.begin() || !_readUnprocessed.b.empty()))
         {
-            decrypted = decryptMessage(buf);
+            size_t decrypted = decryptMessage(buf);
+            buf.i += decrypted;
             if (_sslConnectionRenegotiating)
             {
                 // The peer has requested a renegotiation.
@@ -912,31 +951,23 @@ Schannel::TransceiverI::finishRead(IceInternal::Buffer& buf)
                     _extraBuffer.b.begin()};
                 IceInternal::SocketOperation op = sslHandshake(&extraBuffer);
                 _extraBuffer.b.clear();
-                if (op == IceInternal::SocketOperationNone)
+                if (op != IceInternal::SocketOperationNone)
                 {
-                    _sslConnectionRenegotiating = false;
-                    if (buf.i != buf.b.begin())
-                    {
-                        continue;
-                    }
-                    break;
+                    throw ConnectionLostException(__FILE__, __LINE__);
                 }
-                throw ConnectionLostException(__FILE__, __LINE__);
+                _sslConnectionRenegotiating = false;
+                continue;
             }
-            break;
+            if (decrypted == 0)
+            {
+                // Not enough buffered data to decrypt a complete record; wait for the next read.
+                break;
+            }
         }
 
-        if (decrypted > 0)
-        {
-            buf.i += decrypted;
-            _delegate->getNativeInfo()->ready(
-                IceInternal::SocketOperationRead,
-                !_readUnprocessed.b.empty() || _readBuffer.i != _readBuffer.b.begin());
-        }
-        else
-        {
-            _delegate->getNativeInfo()->ready(IceInternal::SocketOperationRead, false);
-        }
+        _delegate->getNativeInfo()->ready(
+            IceInternal::SocketOperationRead,
+            buf.i != start && (!_readUnprocessed.b.empty() || _readBuffer.i != _readBuffer.b.begin()));
     }
 }
 

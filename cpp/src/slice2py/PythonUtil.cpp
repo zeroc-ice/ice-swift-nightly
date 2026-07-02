@@ -1930,8 +1930,9 @@ Slice::Python::CodeVisitor::visitInterfaceDefStart(const InterfaceDefPtr& p)
         if (operation->isDeprecated())
         {
             // Get the deprecation reason if present, or default to an empty string.
-            string reason = operation->getDeprecationReason().value_or("");
-            out << nl << className << "._op_" << sliceName << ".deprecate(\"" << reason << "\")";
+            const string reason = operation->getDeprecationReason().value_or("");
+            const string escapedReason = toStringLiteral(reason, "\a\b\f\n\r\t\v", "", UCN, 0);
+            out << nl << className << "._op_" << sliceName << ".deprecate(\"" << escapedReason << "\")";
         }
     }
 
@@ -2693,14 +2694,14 @@ namespace
             {
                 if (moduleImports.imported)
                 {
-                    out << nl << "import " << moduleName;
+                    outT << nl << "import " << moduleName;
                     if (moduleImports.moduleAlias.empty())
                     {
                         allImports.insert(moduleName);
                     }
                     else
                     {
-                        out << " as " << moduleImports.moduleAlias;
+                        outT << " as " << moduleImports.moduleAlias;
                         allImports.insert(moduleImports.moduleAlias);
                     }
                     hasTypingImports = true;

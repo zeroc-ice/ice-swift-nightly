@@ -210,25 +210,19 @@ namespace
         {
             // Then we perform additional parsing to extract the name...
 
-            auto nameStart = line.find_first_not_of(ws, tag.size());
+            auto nameStart = doc.find_first_not_of(ws);
             if (nameStart == string::npos)
             {
-                return false; // Malformed line, ignore it.
+                return false; // Malformed line, missing the name part after the tag. Ignore this line.
             }
 
-            auto nameEnd = line.find_first_of(ws, nameStart);
-            if (nameEnd == string::npos)
-            {
-                return false; // Malformed line, ignore it.
-            }
-            name = line.substr(nameStart, nameEnd - nameStart);
+            // If there's no whitespace after the name, that means the name runs to the end of the line.
+            auto nameEnd = doc.find_first_of(ws, nameStart);
+            name = (nameEnd == string::npos) ? doc.substr(nameStart) : doc.substr(nameStart, nameEnd - nameStart);
 
-            // Store whatever remains of the doc comment in the `doc` string.
-            auto docSplitPos = line.find_first_not_of(ws, nameEnd);
-            if (docSplitPos != string::npos)
-            {
-                doc = line.substr(docSplitPos);
-            }
+            // If there's any non-whitespace characters after the name, store them in the `doc` string.
+            auto docStart = doc.find_first_not_of(ws, nameEnd);
+            doc = (docStart == string::npos) ? "" : doc.substr(docStart);
 
             return true;
         }
@@ -325,12 +319,24 @@ namespace
         const string linkTag = "{@link ";
 
         auto endpos = line.find('}', pos);
-        if (endpos != string::npos)
+        if (endpos == string::npos)
         {
-            // Extract the linked-to identifier.
+            // No closing brace was found. Emit a warning, then skip to the next line. This one is broken.
+            const string msg = "unterminated link tag: missing closing '}'";
+            p->unit()->warning(p->file(), p->line(), InvalidComment, msg);
+
+            pos = line.size();
+        }
+        else
+        {
+            // Extract the linked-to identifier, trimming any whitespace around it.
+            string linkText;
             auto identStart = line.find_first_not_of(" \t", pos + linkTag.size());
-            auto identEnd = line.find_last_not_of(" \t", endpos);
-            string linkText = line.substr(identStart, identEnd - identStart);
+            if (identStart < endpos)
+            {
+                auto identEnd = line.find_last_not_of(" \t", endpos - 1);
+                linkText = line.substr(identStart, identEnd - identStart + 1);
+            }
 
             // Then erase the entire '{@link foo}' tag from the comment.
             line.erase(pos, endpos - pos + 1);

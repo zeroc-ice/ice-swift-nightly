@@ -767,6 +767,13 @@ SessionI::destroyImpl(const exception_ptr& ex)
     assert(!_destroyed);
     _destroyed = true;
 
+    // Cancel and clear any pending retry task to break the reference cycle (_retryTask -> task -> lambda -> self).
+    if (_retryTask)
+    {
+        _instance->cancelTimerTask(_retryTask);
+        _retryTask = nullptr;
+    }
+
     if (_traceLevels->session > 0)
     {
         Trace out(_traceLevels->logger, _traceLevels->sessionCat);
@@ -810,12 +817,28 @@ SessionI::destroyImpl(const exception_ptr& ex)
         _topics.clear();
     }
 
+    // Deliver disconnect notifications queued while detaching topics above. The timer and AMI teardown paths have
+    // no later flush() like the dispatch and connection-close paths, so without this they could sit in the queue
+    // indefinitely. flush() only signals the executor thread (no inline callbacks), so it's safe under _mutex.
+    _instance->getCallbackExecutor()->flush();
+
     try
     {
         _instance->getObjectAdapter()->remove(_proxy->ice_getIdentity());
     }
     catch (const ObjectAdapterDestroyedException&)
     {
+    }
+}
+
+void
+SessionI::cancelRetryTask()
+{
+    lock_guard<mutex> lock(_mutex);
+    if (_retryTask)
+    {
+        _instance->cancelTimerTask(_retryTask);
+        _retryTask = nullptr;
     }
 }
 
@@ -936,14 +959,24 @@ SessionI::disconnect(int64_t topicId, TopicI* topic)
         return;
     }
 
-    if (_topics.find(topicId) == _topics.end())
+    auto t = _topics.find(topicId);
+    if (t == _topics.end())
     {
         return; // Peer topic detached first.
     }
+    auto& subscriber = t->second;
 
-    runWithTopic(topicId, topic, [&](TopicSubscriber&) { unsubscribe(topicId, topic); });
+    // disconnect() is called from TopicI::destroy() after the topic is marked destroyed, so detach the listeners
+    // directly here instead of through runWithTopic, which skips destroyed topics. Skipping the unsubscribe (and the
+    // element detachKey/detachFilter it drives) would leave TopicI::_listenerCount stale and trip a debug assert.
+    if (subscriber.getSubscribers().find(topic) != subscriber.getSubscribers().end())
+    {
+        unique_lock<mutex> topicLock(topic->getMutex());
+        _topicLock = &topicLock;
+        unsubscribe(topicId, topic);
+        _topicLock = nullptr;
+    }
 
-    auto& subscriber = _topics.at(topicId);
     subscriber.removeSubscriber(topic);
     if (subscriber.getSubscribers().empty())
     {
@@ -1104,16 +1137,48 @@ SessionI::disconnectFromFilter(int64_t topicId, int64_t filterId, const std::sha
 }
 
 LongLongDict
-SessionI::getLastIds(int64_t topicId, int64_t keyId, const std::shared_ptr<DataElementI>& element)
+SessionI::getLastIds(int64_t topicId, int64_t keyOrFilterId, const std::shared_ptr<DataElementI>& element)
 {
     LongLongDict lastIds;
     auto p = _topics.find(topicId);
     if (p != _topics.end())
     {
         TopicSubscriber& subscriber = p->second.getSubscriber(element->getTopic());
-        for (const auto& [elementId, _] : subscriber.keys[keyId].second)
+        if (keyOrFilterId < 0)
         {
-            lastIds.emplace(elementId, subscriber.get(elementId)->getSubscriber(element)->lastId);
+            // Filter subscription: report this element's lastId for each remote filter element it's subscribed to,
+            // keyed by the element's positive id (`-elementId`, the id the writer matches in DataElementI::attach).
+            // Unlike keys, filter subscriptions aren't indexed by id, so scan all subscriptions and pick the filter
+            // ones (negative element id). The value of `keyOrFilterId` isn't used to select them: a single filter
+            // can match multiple remote writer elements with distinct element ids, so report them all.
+            for (auto& [elementId, elementSubscribers] : subscriber.getAll())
+            {
+                if (elementId < 0)
+                {
+                    if (auto* s = elementSubscribers.getSubscriber(element))
+                    {
+                        lastIds.emplace(-elementId, s->lastId);
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Key subscription: report this element's lastId for each remote element it's subscribed to under this
+            // key. Key subscriptions are indexed by remote key id, so look the key up directly. An element id can
+            // remain in the key map after its ElementSubscribers was removed (e.g. a multi-key element detaches
+            // under one key but its other keys are still counted), so skip ids with no live subscriber, like the
+            // filter branch above.
+            for (const auto& [elementId, _] : subscriber.keys[keyOrFilterId].second)
+            {
+                if (auto* elementSubscribers = subscriber.get(elementId))
+                {
+                    if (auto* s = elementSubscribers->getSubscriber(element))
+                    {
+                        lastIds.emplace(elementId, s->lastId);
+                    }
+                }
+            }
         }
     }
     return lastIds;
@@ -1164,7 +1229,10 @@ SessionI::subscriberInitialized(
         auto keyFactory = element->getTopic()->getKeyFactory();
         for (const auto& sample : samples)
         {
-            assert((!key && !sample.keyValue.empty()) || key == subscriber.keys[sample.keyId].first);
+            // An any-key writer marshals the key inline (keyId 0, keyValue set), as the live data path in s()
+            // handles; accept an inline-key sample for a key subscription too, rather than requiring keyId to map
+            // to the subscription key.
+            assert(!sample.keyValue.empty() || key == subscriber.keys[sample.keyId].first);
 
             samplesI.push_back(sampleFactory->create(
                 _id,

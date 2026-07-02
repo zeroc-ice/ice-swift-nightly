@@ -185,11 +185,6 @@ namespace
         return true;
     }
 
-    template<typename GetKeyFunc, typename Seq> Seq getSeqUpdatedElts(const Seq& lseq, const Seq& rseq, GetKeyFunc func)
-    {
-        return getSeqUpdatedEltsWithEq(lseq, rseq, func, equal_to<typename Seq::value_type>());
-    }
-
     template<typename GetKeyFunc, typename EqFunc, typename Seq>
     Seq getSeqUpdatedEltsWithEq(const Seq& lseq, const Seq& rseq, GetKeyFunc func, EqFunc eq)
     {
@@ -827,6 +822,13 @@ Resolver::hasReplicaGroup(const string& id) const
 string
 Resolver::substitute(const string& v, bool useParams, bool useIgnored) const
 {
+    set<string> inProgress;
+    return substitute(v, useParams, useIgnored, inProgress);
+}
+
+string
+Resolver::substitute(const string& v, bool useParams, bool useIgnored, set<string>& inProgress) const
+{
     string value(v);
     string::size_type beg = 0;
     string::size_type end = 0;
@@ -890,7 +892,12 @@ Resolver::substitute(const string& v, bool useParams, bool useIgnored) const
         string val = getVariable(name, useParams, param);
         if (!param)
         {
-            val = substitute(val, false, useIgnored); // Recursive resolution
+            if (!inProgress.insert(name).second)
+            {
+                throw invalid_argument("detected circular dependency in variable '" + name + "'");
+            }
+            val = substitute(val, false, useIgnored, inProgress); // Recursive resolution
+            inProgress.erase(name);
         }
         value.replace(beg, end - beg + 1, val);
         beg += val.length();
@@ -2303,18 +2310,6 @@ NodeHelper::getServerInfos(const string& app, const string& uuid, int revision, 
         info.descriptor = server.second.getServerInstance();
         servers.insert(make_pair(server.second.getId(), info));
     }
-}
-
-bool
-NodeHelper::hasServers() const
-{
-    return !_serverInstances.empty() || !_servers.empty();
-}
-
-bool
-NodeHelper::hasServer(const string& name) const
-{
-    return _serverInstances.find(name) != _serverInstances.end() || _servers.find(name) != _servers.end();
 }
 
 void

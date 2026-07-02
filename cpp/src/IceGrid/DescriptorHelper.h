@@ -53,6 +53,7 @@ namespace IceGrid
 
     private:
         [[nodiscard]] std::string substitute(const std::string&, bool, bool) const;
+        [[nodiscard]] std::string substitute(const std::string&, bool, bool, std::set<std::string>&) const;
         std::string getVariable(const std::string&, bool, bool&) const;
         PropertyDescriptorSeq getProperties(const Ice::StringSeq&, std::set<std::string>&) const;
 
@@ -260,8 +261,6 @@ namespace IceGrid
         [[nodiscard]] const NodeDescriptor& getDefinition() const;
         [[nodiscard]] const NodeDescriptor& getInstance() const;
         void getServerInfos(const std::string&, const std::string&, int, std::map<std::string, ServerInfo>&) const;
-        [[nodiscard]] bool hasServers() const;
-        [[nodiscard]] bool hasServer(const std::string&) const;
         void print(IceInternal::Output&) const;
         void printDiff(IceInternal::Output&, const NodeHelper&) const;
 

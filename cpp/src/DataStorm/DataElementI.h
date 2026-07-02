@@ -374,10 +374,15 @@ namespace DataStormI
         [[nodiscard]] virtual bool matchKey(const std::shared_ptr<Key>&) const = 0;
         [[nodiscard]] bool addConnectedKey(const std::shared_ptr<Key>&, const std::shared_ptr<Subscriber>&) override;
 
+        // Returns true if the given sample priority is lower than the highest priority among the connected publishers
+        // that can deliver the given key (a keyed peer under the key, or a filter/any-key peer under the null key).
+        [[nodiscard]] bool hasLowerPriorityThanConnected(int priority, const std::shared_ptr<Key>& key) const;
+
         TopicReaderI* _parent;
 
         std::deque<std::shared_ptr<Sample>> _samples;
-        std::shared_ptr<Sample> _last;
+        // The last sample received for each key, used to resolve partial updates per key.
+        std::map<std::shared_ptr<Key>, std::shared_ptr<Sample>> _lastByKey;
         int _instanceCount{0};
         DataStorm::DiscardPolicy _discardPolicy;
         std::chrono::time_point<std::chrono::system_clock> _lastSendTime;
@@ -397,7 +402,8 @@ namespace DataStormI
         TopicWriterI* _parent;
         DataStormContract::SubscriberSessionPrx _subscribers;
         std::deque<std::shared_ptr<Sample>> _samples;
-        std::shared_ptr<Sample> _last;
+        // The last sample published for each key, used to resolve partial updates per key. See DataReaderI::_lastByKey.
+        std::map<std::shared_ptr<Key>, std::shared_ptr<Sample>> _lastByKey;
     };
 
     class KeyDataReaderI final : public DataReaderI

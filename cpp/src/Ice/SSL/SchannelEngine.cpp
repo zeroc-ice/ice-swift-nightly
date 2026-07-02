@@ -568,9 +568,12 @@ namespace
                          0,
                          CERT_FIND_ANY,
                          0,
-                         next)) != 0)
+                         next)) != nullptr)
                 {
-                    certs.push_back(next);
+                    // CertFindCertificateInStore frees the context passed as pPrevCertContext on the next iteration
+                    // (and frees the last one when it returns null). Duplicate the context to keep an owned reference
+                    // that remains valid after enumeration; these duplicates are released in the destructor.
+                    certs.push_back(CertDuplicateCertificateContext(next));
                 }
             } while (next);
             stores.push_back(store);
@@ -598,7 +601,13 @@ namespace
             if (startpos != string::npos)
             {
                 endpos = strbuf.find("-----END CERTIFICATE-----", startpos);
-                size = endpos - startpos + sizeof("-----END CERTIFICATE-----");
+                if (endpos == string::npos)
+                {
+                    ostringstream os;
+                    os << "SSL transport: malformed PEM certificate (missing END marker): '" << file << "'";
+                    throw InitializationException(__FILE__, __LINE__, os.str());
+                }
+                size = endpos - startpos + strlen("-----END CERTIFICATE-----");
             }
             else if (first)
             {
@@ -785,7 +794,15 @@ Schannel::SSLEngine::~SSLEngine()
 
         for (vector<HCERTSTORE>::const_iterator i = _stores.begin(); i != _stores.end(); ++i)
         {
+#ifdef NDEBUG
             CertCloseStore(*i, 0);
+#else
+            // In debug builds, close the store with CERT_CLOSE_STORE_CHECK_FLAG to assert that every certificate
+            // context obtained from it was freed. The call returns false (last error CRYPT_E_PENDING_CLOSE) if any
+            // context is still outstanding, which catches certificate-reference leaks early.
+            const BOOL allContextsFreed = CertCloseStore(*i, CERT_CLOSE_STORE_CHECK_FLAG);
+            assert(allContextsFreed && "SSL transport: certificate context leaked (store closed with live contexts)");
+#endif
         }
     }
     catch (...)
@@ -1267,9 +1284,16 @@ Schannel::SSLEngine::createClientAuthenticationOptions(const string& host) const
         .clientCredentialsSelectionCallback =
             [this](const string&)
         {
+            // The transport takes ownership of the returned paCred contexts and releases them when the connection
+            // is closed (see ClientAuthenticationOptions). Bump the reference count of each certificate so the
+            // reference handed to the transport is independent of the engine's _allCerts, which outlives the
+            // individual connections.
             for (const auto& cert : _allCerts)
             {
-                CertDuplicateCertificateContext(cert);
+                // CertDuplicateCertificateContext returns the same pointer with an incremented reference count and
+                // cannot fail for a non-null context; the assert guards that invariant.
+                [[maybe_unused]] PCCERT_CONTEXT duplicate = CertDuplicateCertificateContext(cert);
+                assert(duplicate == cert);
             }
 
             return SCH_CREDENTIALS{
@@ -1312,9 +1336,16 @@ Schannel::SSLEngine::createServerAuthenticationOptions() const
             [this](const string&)
         {
             {
+                // The transport takes ownership of the returned paCred contexts and releases them when the
+                // connection is closed (see ServerAuthenticationOptions). Bump the reference count of each
+                // certificate so the reference handed to the transport is independent of the engine's _allCerts,
+                // which outlives the individual connections.
                 for (const auto& cert : _allCerts)
                 {
-                    CertDuplicateCertificateContext(cert);
+                    // CertDuplicateCertificateContext returns the same pointer with an incremented reference count
+                    // and cannot fail for a non-null context; the assert guards that invariant.
+                    [[maybe_unused]] PCCERT_CONTEXT duplicate = CertDuplicateCertificateContext(cert);
+                    assert(duplicate == cert);
                 }
 
                 return SCH_CREDENTIALS{

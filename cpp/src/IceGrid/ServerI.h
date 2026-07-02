@@ -89,7 +89,7 @@ namespace IceGrid
             std::function<void(ServerPrx, const AdapterPrxDict&, int, int)>,
             std::function<void(std::exception_ptr)>);
         bool checkUpdate(std::shared_ptr<InternalServerDescriptor>, bool, const Ice::Current&) override;
-        void checkRemove(bool, const Ice::Current&);
+
         std::shared_ptr<ServerCommand>
         destroy(const std::string&, int, const std::string&, bool, std::function<void()>);
 
@@ -128,6 +128,12 @@ namespace IceGrid
         void setState(InternalServerState, const std::string& = std::string());
         std::shared_ptr<ServerCommand> nextCommand();
         void setStateNoSync(InternalServerState, const std::string& = std::string());
+
+        // Returns a dictionary with the proxies of all the server's adapters.
+        [[nodiscard]] AdapterPrxDict getAdapterProxies() const;
+
+        // Completes the pending load command (_load), handing back the current server and adapter proxies.
+        void finishLoad();
 
         [[nodiscard]] ServerState toServerState(InternalServerState) const;
         [[nodiscard]] ServerActivation toServerActivation(const std::string&) const;
@@ -171,6 +177,7 @@ namespace IceGrid
 
         int _pid{0};
 
+        // Lock order: ServerI::_mutex is always acquired before ServerAdapterI::_mutex, never after.
         mutable std::mutex _mutex;
         std::condition_variable _condVar;
     };
