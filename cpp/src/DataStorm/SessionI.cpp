@@ -649,6 +649,13 @@ SessionI::disconnected(const ConnectionPtr& connection, exception_ptr ex)
         runWithTopics(topicId, [topicId, self](TopicI* topic, TopicSubscriber&) { topic->detach(topicId, self); });
     }
 
+    // The peer's wire disconnected() op is not a connection close, so unregister the session that connected()
+    // registered with the connection manager here (a no-op if the connection already closed).
+    if (_connection)
+    {
+        _instance->getConnectionManager()->remove(self, _connection);
+    }
+
     _session = nullopt;
     _connection = nullptr;
     _retryCount = 0;
@@ -1220,8 +1227,13 @@ SessionI::subscriberInitialized(
     }
     else
     {
-        assert(samples.front().id > elementSubscriber->lastId);
-        elementSubscriber->lastId = samples.back().id;
+        // A multi-key subscriber shares a single ElementSubscriber across its keys, and the peer acks one batch per
+        // key, so this runs once per key with sample ids interleaved across keys — a later batch need not strictly
+        // follow the previous one. Advance lastId monotonically to the newest id seen (samples are ordered by id).
+        if (samples.back().id > elementSubscriber->lastId)
+        {
+            elementSubscriber->lastId = samples.back().id;
+        }
 
         vector<shared_ptr<Sample>> samplesI;
         samplesI.reserve(samples.size());
