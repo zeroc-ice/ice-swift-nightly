@@ -182,8 +182,11 @@ void ::Writer::run(int argc, char* argv[])
         joinBarrier.waitForReaders();
         joinBarrier.update(0);
 
-        // Wait until the reader has installed its onSamples callback before publishing the partial.
+        // Wait until the reader has installed its onSamples callback before publishing the partial. The barrier
+        // only orders the callback installation; also wait for the reader's element to attach, otherwise
+        // waitForNoReaders below can return before the reader ever attached.
         [[maybe_unused]] auto _ = makeSingleKeyReader(lateReaderReadyBarrier, "barrier").getNextUnread();
+        writer.waitForReaders();
 
         writer.partialUpdate<float>("price")(15.0f);
         writer.waitForNoReaders();
@@ -235,6 +238,30 @@ void ::Writer::run(int argc, char* argv[])
 
         writer.waitForReaders();
         writer.partialUpdate<float>("price")("MSFT", 55.0f); // resolves only if MSFT's base survived the cap
+        writer.waitForNoReaders();
+    }
+    cout << "ok" << endl;
+
+    // The reader-side updater throws on one of the initialization samples: only that sample is dropped, the other
+    // initialization samples are delivered, and the following partial update resolves against the last successfully
+    // applied value.
+    Topic<string, StockPtr> throwTopic(node, "throwingUpdater");
+    throwTopic.setWriterDefaultConfig(config); // keep full history
+    throwTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    Topic<string, int> throwBarrier(node, "throwingUpdaterBarrier");
+    cout << "testing reader-side updater exception... " << flush;
+    {
+        auto writer = makeSingleKeyWriter(throwTopic, "AAPL");
+        writer.add(make_shared<Stock>(12.0f, 13.0f, 14.0f));
+        writer.partialUpdate<float>("price")(-99.0f); // the reader's updater throws on negative prices
+        writer.partialUpdate<float>("price")(15.0f);
+
+        // Let the reader join late, so the three samples above are delivered as initialization samples.
+        auto barrier = makeSingleKeyWriter(throwBarrier, "barrier");
+        barrier.waitForReaders();
+        barrier.update(0);
+
+        writer.waitForReaders();
         writer.waitForNoReaders();
     }
     cout << "ok" << endl;
