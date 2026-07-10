@@ -1480,14 +1480,14 @@ ServerI::activate()
         //
         // We first ensure that the application is replicated on all the
         // registries before to start the server. We only do this each
-        // time the server is updated or initialy loaded on the node.
+        // time the server is updated or initially loaded on the node.
         //
         if (waitForReplication)
         {
             auto session = _node->getMasterNodeSession();
             if (session)
             {
-                _node->getMasterNodeSession()->waitForApplicationUpdateAsync(
+                session->waitForApplicationUpdateAsync(
                     desc->uuid,
                     desc->revision,
                     [self = shared_from_this()] { self->waitForApplicationUpdateCompleted(); },
@@ -2474,6 +2474,11 @@ ServerI::updateRuntimePropertiesCallback(const shared_ptr<InternalServerDescript
     assert(_process);
     if (_load->finishRuntimePropertiesUpdate(desc, *_process))
     {
+        // The server's runtime properties now match the updated descriptor: adopt it as the server's descriptor
+        // so that loading the same descriptor again replies immediately instead of waiting on the load command.
+        // The load command remains set: it still needs to run once the server stops, to write the updated
+        // configuration to disk.
+        _desc = _load->getInternalServerDescriptor();
         finishLoad();
     }
 }
@@ -2491,6 +2496,9 @@ ServerI::updateRuntimePropertiesCallback(exception_ptr ex, const shared_ptr<Inte
     if (_load->finishRuntimePropertiesUpdate(desc, *_process))
     {
         _load->failed(ex);
+        // Drop the load command so that loading the same descriptor again retries the runtime properties update
+        // instead of waiting forever on this completed command.
+        _load = nullptr;
     }
 }
 
@@ -2698,6 +2706,13 @@ ServerI::setStateNoSync(InternalServerState st, const string& reason)
                 loadFailure = _destroy->loadFailure();
                 _destroy->finished();
                 _destroy = nullptr;
+            }
+            if (_load)
+            {
+                // load() can queue a load command while the server is being destroyed, since destroy() runs mostly
+                // without the mutex. Fail it here so its reply is sent and the servant is removed below.
+                _load->failed(make_exception_ptr(DeploymentException("The server was destroyed.")));
+                _load = nullptr;
             }
             _condVar.notify_all(); // for getProperties()
             break;
