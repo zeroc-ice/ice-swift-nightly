@@ -394,27 +394,36 @@ CreateSession::addPendingCallback(shared_ptr<CreateSession> callback)
 void
 CreateSession::authorized(bool createSession)
 {
-    //
-    // Create the filter manager now as it's required for the session control object.
-    //
-    _filterManager = createFilterManager();
+    // This function runs from an AMI response callback: an exception escaping it would be swallowed by the
+    // Ice runtime, leaving the client without a reply and the connection's pending-creation entry in place.
+    try
+    {
+        //
+        // Create the filter manager now as it's required for the session control object.
+        //
+        _filterManager = createFilterManager();
 
-    //
-    // If we have a session manager configured, we create a client-visible session object,
-    // otherwise, we return a null session proxy.
-    //
-    if (createSession)
-    {
-        if (_instance->serverObjectAdapter())
+        //
+        // If we have a session manager configured, we create a client-visible session object,
+        // otherwise, we return a null session proxy.
+        //
+        if (createSession)
         {
-            auto obj = make_shared<SessionControlI>(_sessionRouter, _current.con, _filterManager);
-            _control = _instance->serverObjectAdapter()->addWithUUID<SessionControlPrx>(obj);
+            if (_instance->serverObjectAdapter())
+            {
+                auto obj = make_shared<SessionControlI>(_sessionRouter, _current.con, _filterManager);
+                _control = _instance->serverObjectAdapter()->addWithUUID<SessionControlPrx>(obj);
+            }
+            this->createSession();
         }
-        this->createSession();
+        else
+        {
+            sessionCreated(nullopt);
+        }
     }
-    else
+    catch (const Ice::Exception&)
     {
-        sessionCreated(nullopt);
+        unexpectedCreateSessionException(current_exception());
     }
 }
 
@@ -464,7 +473,14 @@ CreateSession::sessionCreated(optional<SessionPrx> session)
     {
         if (session)
         {
-            session->destroyAsync(nullptr); // don't wait for response
+            try
+            {
+                session->destroyAsync(nullptr); // don't wait for response
+            }
+            catch (const Ice::CommunicatorDestroyedException&)
+            {
+                // Ignored: the session is destroyed along with the communicator.
+            }
         }
         unexpectedCreateSessionException(current_exception());
         return;
@@ -746,6 +762,24 @@ SessionRouterI::destroySessionAsync(function<void()> response, function<void(exc
 }
 
 void
+SessionRouterI::refreshSessionAsync(
+    function<void()> response,
+    function<void(exception_ptr)> exception,
+    const Current& current)
+{
+    // This operation is deprecated and no longer refreshes the session, but it still reports whether the caller
+    // has a session with this router.
+    if (getRouter(current.con, current.id, false))
+    {
+        response();
+    }
+    else
+    {
+        exception(make_exception_ptr(SessionNotExistException()));
+    }
+}
+
+void
 SessionRouterI::destroySession(const ConnectionPtr& connection, function<void(exception_ptr)> error)
 {
     shared_ptr<RouterI> router;
@@ -936,6 +970,10 @@ SessionRouterI::sessionDestroyException(exception_ptr ex) const
         try
         {
             rethrow_exception(ex);
+        }
+        catch (const Ice::CommunicatorDestroyedException&)
+        {
+            // Expected when the router shuts down with sessions still active.
         }
         catch (const Ice::Exception& e)
         {
