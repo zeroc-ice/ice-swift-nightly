@@ -54,7 +54,7 @@ DataElementI::DataElementI(TopicI* parent, string name, int64_t id, const DataSt
       _id(id),
       _config(make_shared<ElementConfig>()),
       _executor(parent->instance()->getCallbackExecutor()),
-      // The collocated forwarder is initalized here to avoid using a nullable proxy. The forwarder is only used by
+      // The collocated forwarder is initialized here to avoid using a nullable proxy. The forwarder is only used by
       // the instance that owns it and is removed in destroy implementation.
       _forwarder{parent->instance()->getCollocatedForwarder()->add<SessionPrx>(
           [this](const ByteSeq& inParams, const Current& current) { forward(inParams, current); })},
@@ -125,7 +125,7 @@ DataElementI::attach(
         name = os.str();
     }
 
-    // Attach the key or filter, and if attach success compute the ACK data to send to the peer.
+    // Attach the key or filter, and if the attach succeeds, compute the ACK data to send to the peer.
     if ((id > 0 &&
          attachKey(topicId, data.id, key, sampleFilter, session, std::move(prx), facet, id, name, priority)) ||
         (id < 0 &&
@@ -134,13 +134,13 @@ DataElementI::attach(
         auto q = data.lastIds.find(_id);
         int64_t lastId = q != data.lastIds.end() ? q->second : 0;
         LongLongDict lastIds = key ? session->getLastIds(topicId, id, shared_from_this()) : LongLongDict{};
-        DataSamples samples = getSamples(key, sampleFilter, data.config, lastId, now);
+        DataSamples initializationBatch = getSamples(key, sampleFilter, data.config, lastId, now);
 
         acks.push_back(ElementDataAck{
             .id = _id,
             .config = _config,
             .lastIds = std::move(lastIds),
-            .samples = std::move(samples.samples),
+            .samples = std::move(initializationBatch.samples),
             .peerId = data.id});
     }
 }
@@ -155,7 +155,7 @@ DataElementI::attach(
     SessionPrx prx,
     const ElementDataAck& data,
     const chrono::time_point<chrono::system_clock>& now,
-    DataSamplesSeq& samples)
+    DataSamplesSeq& initializationBatches)
 {
     // Called with the topic and session from TopicI::attachElementsAck locked.
     shared_ptr<Filter> sampleFilter;
@@ -190,7 +190,12 @@ DataElementI::attach(
     {
         auto q = data.lastIds.find(_id);
         int64_t lastId = q != data.lastIds.end() ? q->second : 0;
-        samples.push_back(getSamples(key, sampleFilter, data.config, lastId, now));
+        DataSamples initializationBatch = getSamples(key, sampleFilter, data.config, lastId, now);
+        // Address the batch to the peer reader element so the receiver initializes exactly that reader. A multi-key
+        // writer produces one batch per key here; the session merges the batches sharing a writer-reader pair before
+        // sending them.
+        initializationBatch.peerId = data.id;
+        initializationBatches.push_back(std::move(initializationBatch));
     }
 
     auto samplesI =
@@ -677,10 +682,10 @@ DataElementI::forward(const ByteSeq& inParams, const Current& current) const
 {
     for (const auto& [_, listener] : _listeners)
     {
-        // If we are forwarding a sample check if at least once of the listeners is interested in the sample.
+        // If we are forwarding a sample, check whether at least one of the listeners is interested in it.
         if (!_sample || listener.matchOne(_sample, false))
         {
-            // Forward the call using the listener's session proxy don't need to wait for the result.
+            // Forward the call using the listener's session proxy. We don't need to wait for the result.
             listener.proxy
                 ->ice_invokeAsync(current.operation, current.mode, inParams, nullptr, nullptr, nullptr, current.ctx);
         }
@@ -1457,8 +1462,8 @@ KeyDataWriterI::getSamples(
     const chrono::time_point<chrono::system_clock>& now)
 {
     // Collect all queued samples that match the key and sample filter, are newer than the lastId, and are not stale.
-    DataSamples samples;
-    samples.id = _keys.empty() ? -_id : _id;
+    DataSamples initializationBatch;
+    initializationBatch.id = _keys.empty() ? -_id : _id;
 
     // Orders the source samples to deliver by id, caps them to the reader's history depth, and delivers them. A
     // partial base is sent as a full Update, and the earliest delivered sample of each key is likewise resolved to a
@@ -1516,16 +1521,16 @@ KeyDataWriterI::getSamples(
         set<shared_ptr<Key>> seen;
         for (const auto& sample : sources)
         {
-            DataSample ds = toSample(sample, getCommunicator(), _keys.empty());
+            DataSample initializationSample = toSample(sample, getCommunicator(), _keys.empty());
             // The earliest delivered sample of each key must carry a full value; a partial is sent as a full Update
             // built from the sample's own resolved value.
             if (seen.insert(sample->key).second && sample->event == DataStorm::SampleEvent::PartialUpdate)
             {
-                ds.tag = 0;
-                ds.event = DataStorm::SampleEvent::Update;
-                ds.value = sample->encodeValue(getCommunicator());
+                initializationSample.tag = 0;
+                initializationSample.event = DataStorm::SampleEvent::Update;
+                initializationSample.value = sample->encodeValue(getCommunicator());
             }
-            samples.samples.push_back(std::move(ds));
+            initializationBatch.samples.push_back(std::move(initializationSample));
         }
     };
 
@@ -1552,7 +1557,7 @@ KeyDataWriterI::getSamples(
     if (config->sampleCount && *config->sampleCount == 0)
     {
         finalize(collectBases({}));
-        return samples;
+        return initializationBatch;
     }
 
     // Reap stale samples before collecting any samples.
@@ -1561,7 +1566,7 @@ KeyDataWriterI::getSamples(
         cleanOldSamples(_samples, now, *_config->sampleLifetime);
     }
 
-    // Compute the stale time, according to the callers sample lifetime configuration.
+    // Compute the stale time, according to the caller's sample lifetime configuration.
     chrono::time_point<chrono::system_clock> staleTime = chrono::time_point<chrono::system_clock>::min();
     if (config->sampleLifetime && *config->sampleLifetime > 0)
     {
@@ -1616,7 +1621,7 @@ KeyDataWriterI::getSamples(
     auto bases = collectBases(covered);
     sources.insert(sources.end(), bases.begin(), bases.end());
     finalize(std::move(sources));
-    return samples;
+    return initializationBatch;
 }
 
 void
@@ -1639,7 +1644,7 @@ KeyDataWriterI::forward(const ByteSeq& inParams, const Current& current) const
         // and an unmatched key's sample would be wasted bandwidth at best (the receiver never subscribed its id).
         if (!_sample || listener.matchOne(_sample, true))
         {
-            // Forward the call using the listener's session proxy, don't need to wait for the result.
+            // Forward the call using the listener's session proxy. We don't need to wait for the result.
             listener.proxy
                 ->ice_invokeAsync(current.operation, current.mode, inParams, nullptr, nullptr, nullptr, current.ctx);
         }
