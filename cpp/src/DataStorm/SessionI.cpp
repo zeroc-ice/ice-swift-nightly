@@ -103,11 +103,40 @@ SessionI::announceTopics(TopicInfoSeq topics, bool, const Current&)
         }
 
         // Reap dead topics corresponding to subscriptions from a previous session instance ID. Subscribers from the
-        // previous session instance ID that were not reattached to the new session instance ID are removed.
+        // previous session instance ID that were not reattached to the new session instance ID are removed. Before a
+        // subscriber is removed, detach its elements: a topic destroyed while the session was disconnected still
+        // holds element listeners (the detach paths skip destroyed topics), and TopicI::disconnect can no longer
+        // detach them once the subscriber entry is gone. The detach is a no-op for a subscriber whose elements were
+        // already detached when the session disconnected.
         auto p = _topics.begin();
         while (p != _topics.end())
         {
-            if (p->second.reap(_sessionInstanceId))
+            auto detach = [this, topicId = p->first](TopicI* topic, TopicSubscriber& subscriber)
+            {
+                if (subscriber.getAll().empty())
+                {
+                    // No element subscriptions: nothing to detach. The element subscribers are also what keeps the
+                    // topic alive (each element holds its parent topic), so the topic must not be dereferenced here.
+                    return;
+                }
+                unique_lock<mutex> topicLock(topic->getMutex());
+                _topicLock = &topicLock;
+                if (topic->isDestroyed())
+                {
+                    // The topic is being destroyed: TopicI::disconnect detaches its elements only while the
+                    // subscriber entry exists, and the entry is erased below. Detach the elements directly instead.
+                    unsubscribe(topicId, topic);
+                }
+                else
+                {
+                    // A live topic whose subscriber went stale (the peer topic was destroyed while the session was
+                    // disconnected, so it was not re-announced). Take the normal detach path, which also drops this
+                    // session from the topic's listeners.
+                    topic->detach(topicId, shared_from_this());
+                }
+                _topicLock = nullptr;
+            };
+            if (p->second.reap(_sessionInstanceId, detach))
             {
                 _topics.erase(p++);
             }
@@ -190,9 +219,23 @@ SessionI::detachTopic(int64_t id, const Current&)
         return;
     }
 
-    runWithTopics(
-        id,
-        [&](TopicI* topic, TopicSubscriber&)
+    auto t = _topics.find(id);
+    if (t == _topics.end())
+    {
+        return;
+    }
+
+    for (auto& [topic, _] : t->second.getSubscribers())
+    {
+        unique_lock<mutex> topicLock(topic->getMutex());
+        _topicLock = &topicLock;
+        if (topic->isDestroyed())
+        {
+            // The topic is being destroyed: TopicI::disconnect detaches its elements only while the subscriber
+            // entry exists, and the entry is erased below. Detach the elements directly instead.
+            unsubscribe(id, topic);
+        }
+        else
         {
             if (_traceLevels->session > 2)
             {
@@ -200,10 +243,12 @@ SessionI::detachTopic(int64_t id, const Current&)
                 out << _id << ": detaching topic '" << id << "' from '" << topic << "'";
             }
             topic->detach(id, shared_from_this());
-        });
+        }
+        _topicLock = nullptr;
+    }
 
     // Erase the topic
-    _topics.erase(id);
+    _topics.erase(t);
 }
 
 void
@@ -524,12 +569,9 @@ SessionI::initSamples(int64_t topicId, DataSamplesSeq samplesSeq, const Current&
 void
 SessionI::disconnected(const Current& current)
 {
-    if (disconnected(current.con, nullptr))
+    if (!handleDisconnected(current.con, nullptr))
     {
-        if (!retry(getNode(), nullptr))
-        {
-            remove();
-        }
+        remove();
     }
 }
 
@@ -555,12 +597,9 @@ SessionI::connected(SessionPrx session, const ConnectionPtr& newConnection, cons
             self,
             [self](const auto& connection, auto ex)
             {
-                if (self->disconnected(connection, ex))
+                if (!self->handleDisconnected(connection, ex))
                 {
-                    if (!self->retry(self->getNode(), nullptr))
-                    {
-                        self->remove();
-                    }
+                    self->remove();
                 }
             });
     }
@@ -601,6 +640,25 @@ bool
 SessionI::disconnected(const ConnectionPtr& connection, exception_ptr ex)
 {
     lock_guard<mutex> lock(_mutex);
+    return disconnectedImpl(connection, ex);
+}
+
+bool
+SessionI::handleDisconnected(const ConnectionPtr& connection, exception_ptr ex)
+{
+    lock_guard<mutex> lock(_mutex);
+    if (!disconnectedImpl(connection, ex))
+    {
+        // Nothing to do: the session is destroyed, already reconnected, or the disconnect was already handled.
+        return true;
+    }
+    return retryImpl(_node, nullptr); // getNode() would deadlock, the mutex is locked
+}
+
+bool
+SessionI::disconnectedImpl(const ConnectionPtr& connection, exception_ptr ex)
+{
+    // Called with the session mutex locked.
     if (_destroyed)
     {
         // Ignore already destroyed.
@@ -608,8 +666,12 @@ SessionI::disconnected(const ConnectionPtr& connection, exception_ptr ex)
     }
     else if (!_session)
     {
-        // A recovery attempt was in progress and failed. Return true to let the caller retry.
-        return true;
+        // When a retry is already scheduled, this is a second notification for the same disconnect: a peer shutdown
+        // produces both the wire disconnected() request and the connection closure, in either order. Letting the
+        // caller retry again would cancel the pending immediate reconnect and replace it with a delayed one,
+        // consuming a retry slot. Otherwise, a recovery attempt was in progress and failed: return true to let the
+        // caller retry.
+        return !_retryTask;
     }
     else if (connection && _connection != connection)
     {
@@ -646,7 +708,17 @@ SessionI::disconnected(const ConnectionPtr& connection, exception_ptr ex)
     auto self = shared_from_this();
     for (const auto& [topicId, _] : _topics)
     {
+        // The analyzer falsely flags the lambda's captures as undefined: it loses track of the closure once it
+        // is stored in runWithTopics' std::function parameter.
+        // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
         runWithTopics(topicId, [topicId, self](TopicI* topic, TopicSubscriber&) { topic->detach(topicId, self); });
+    }
+
+    // The peer's wire disconnected() op is not a connection close, so unregister the session that connected()
+    // registered with the connection manager here (a no-op if the connection already closed).
+    if (_connection)
+    {
+        _instance->getConnectionManager()->remove(self, _connection);
     }
 
     _session = nullopt;
@@ -659,6 +731,20 @@ bool
 SessionI::retry(NodePrx node, exception_ptr exception)
 {
     lock_guard<mutex> lock(_mutex);
+    return retryImpl(std::move(node), std::move(exception));
+}
+
+bool
+SessionI::retryImpl(NodePrx node, exception_ptr exception)
+{
+    // Called with the session mutex locked.
+
+    // A callback from an earlier session creation attempt can run after the session was destroyed; don't schedule a
+    // retry task for a destroyed session.
+    if (_destroyed)
+    {
+        return false;
+    }
 
     if (exception)
     {
@@ -706,7 +792,7 @@ SessionI::retry(NodePrx node, exception_ptr exception)
         if (_traceLevels->session > 0)
         {
             Trace out(_traceLevels->logger, _traceLevels->sessionCat);
-            out << _id << ": can't retry connecting to '" << node->ice_toString() << "', waiting " << delay.count()
+            out << _id << ": cannot retry connecting to '" << node->ice_toString() << "', waiting " << delay.count()
                 << " (ms) for peer to reconnect";
         }
 
@@ -810,9 +896,24 @@ SessionI::destroyImpl(const exception_ptr& ex)
         _connection = nullptr;
 
         auto self = shared_from_this();
-        for (const auto& t : _topics)
+        for (auto& [topicId, subscribers] : _topics)
         {
-            runWithTopics(t.first, [id = t.first, self](TopicI* topic, TopicSubscriber&) { topic->detach(id, self); });
+            for (auto& [topic, _] : subscribers.getSubscribers())
+            {
+                unique_lock<mutex> topicLock(topic->getMutex());
+                _topicLock = &topicLock;
+                if (topic->isDestroyed())
+                {
+                    // The topic is being destroyed: TopicI::disconnect detaches its elements only while the
+                    // subscriber entry exists, and the map is cleared below. Detach the elements directly instead.
+                    unsubscribe(topicId, topic);
+                }
+                else
+                {
+                    topic->detach(topicId, self);
+                }
+                _topicLock = nullptr;
+            }
         }
         _topics.clear();
     }
@@ -954,15 +1055,15 @@ void
 SessionI::disconnect(int64_t topicId, TopicI* topic)
 {
     lock_guard<mutex> lock(_mutex); // Called by TopicI::destroy
-    if (!_session)
-    {
-        return;
-    }
 
+    // No _session check: a session disconnected after the topic was marked destroyed skipped this topic when
+    // detaching (runWithTopics skips destroyed topics), so the subscriber entry must be cleaned up here even when
+    // the session is gone. The checks below cover every other state: the entry is absent when the peer detached the
+    // topic first or the session was destroyed.
     auto t = _topics.find(topicId);
     if (t == _topics.end())
     {
-        return; // Peer topic detached first.
+        return; // Peer topic detached first, or the session was destroyed.
     }
     auto& subscriber = t->second;
 
@@ -1220,8 +1321,13 @@ SessionI::subscriberInitialized(
     }
     else
     {
-        assert(samples.front().id > elementSubscriber->lastId);
-        elementSubscriber->lastId = samples.back().id;
+        // A multi-key subscriber shares a single ElementSubscriber across its keys, and the peer acks one batch per
+        // key, so this runs once per key with sample ids interleaved across keys — a later batch need not strictly
+        // follow the previous one. Advance lastId monotonically to the newest id seen (samples are ordered by id).
+        if (samples.back().id > elementSubscriber->lastId)
+        {
+            elementSubscriber->lastId = samples.back().id;
+        }
 
         vector<shared_ptr<Sample>> samplesI;
         samplesI.reserve(samples.size());
@@ -1388,7 +1494,20 @@ SubscriberSessionI::s(int64_t topicId, int64_t elementId, DataSample dataSample,
                 shared_ptr<Key> key;
                 if (dataSample.keyValue.empty())
                 {
-                    key = topicSubscriber.keys[dataSample.keyId].first;
+                    auto q = topicSubscriber.keys.find(dataSample.keyId);
+                    if (q == topicSubscriber.keys.end())
+                    {
+                        // The session never subscribed to this key (a peer can forward a sample for a key none of
+                        // this session's readers are subscribed to); no subscriber can match it.
+                        if (_traceLevels->session > 2)
+                        {
+                            Trace out(_traceLevels->logger, _traceLevels->sessionCat);
+                            out << _id << ": discarding sample '" << dataSample.id << "[k" << dataSample.keyId
+                                << "]' from 'e" << elementId << '@' << topicId << "': unknown key";
+                        }
+                        return;
+                    }
+                    key = q->second.first;
                 }
                 else
                 {

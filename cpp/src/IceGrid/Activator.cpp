@@ -22,6 +22,8 @@
 #ifndef _WIN32
 #    include <csignal>
 #    include <pwd.h> // for getpwuid
+#    include <sys/resource.h>
+#    include <sys/syscall.h>
 #    include <sys/wait.h>
 #    include <unistd.h>
 #else
@@ -85,6 +87,69 @@ namespace IceGrid
         // process.
         //
         _exit(EXIT_FAILURE);
+    }
+
+    //
+    // Close every inherited file descriptor >= 3, except keep1 and keep2. Runs in the fork child, using only
+    // async-signal-safe calls. maxFd bounds the fallback close loop used when close_range is unavailable. This runs
+    // after setuid/setgid, so a leaked descriptor would cross a privilege boundary.
+    //
+    void closeInheritedDescriptors(int keep1, int keep2, long maxFd)
+    {
+        const int lo = keep1 < keep2 ? keep1 : keep2;
+        const int hi = keep1 < keep2 ? keep2 : keep1;
+
+#    ifdef SYS_close_range
+        //
+        // close_range (Linux 5.9+, FreeBSD 12.2+) closes a whole descriptor
+        // range in a single syscall, so the child never iterates up to a huge
+        // or unlimited RLIMIT_NOFILE. Every supported platform with a huge or
+        // unlimited limit has it (the minimum supported Linux distributions all
+        // ship kernel 5.10+). We keep lo and hi open by closing the ranges
+        // around them. Probe with the always-non-empty top range first: on
+        // success, close the lower ranges too and return. The probe range is
+        // never inverted, so the only realistic failure is the syscall being
+        // unavailable (ENOSYS on an older kernel, or a seccomp EPERM), and on
+        // failure it closes nothing; we fall through to the bounded loop below,
+        // so there is no need to inspect errno. Clamp the probe's start to 3 so
+        // that if both keeps landed below 3 it still cannot close stderr.
+        //
+        const auto probeStart = static_cast<unsigned int>(hi + 1 > 3 ? hi + 1 : 3);
+        if (syscall(SYS_close_range, probeStart, ~0u, 0u) == 0)
+        {
+            if (lo > 3)
+            {
+                syscall(SYS_close_range, 3u, static_cast<unsigned int>(lo) - 1, 0u);
+            }
+            //
+            // Clamp the middle range's start to 3: lo can be below 3 (the pipe
+            // write ends land at 0/1/2 only when a standard descriptor was
+            // already closed before exec), and an unclamped lo + 1 == 2 would
+            // close stderr.
+            //
+            const int mid = lo + 1 > 3 ? lo + 1 : 3;
+            if (hi - 1 >= mid)
+            {
+                syscall(SYS_close_range, static_cast<unsigned int>(mid), static_cast<unsigned int>(hi) - 1, 0u);
+            }
+            return;
+        }
+#    endif
+
+        //
+        // Fallback when close_range is unavailable (a pre-5.9 Linux kernel
+        // outside the supported set, macOS, or a seccomp profile that rejects
+        // the syscall): close descriptors one by one up to maxFd, the bound the
+        // caller computed from the soft RLIMIT_NOFILE before fork(). These
+        // platforms have a modest limit, so the loop stays cheap.
+        //
+        for (long fd = 3; fd < maxFd; ++fd)
+        {
+            if (fd != lo && fd != hi)
+            {
+                close(static_cast<int>(fd));
+            }
+        }
     }
 
 #endif
@@ -349,7 +414,7 @@ Activator::activate(
     string path{exePath}; // NOLINT(performance-unnecessary-copy-initialization)
     if (path.empty())
     {
-        throw invalid_argument("The server executable path is empty.");
+        throw invalid_argument("the server executable path is empty");
     }
 
     string pwd = simplify(pwdPath);
@@ -374,9 +439,9 @@ Activator::activate(
                 if (_traceLevels->activator > 0)
                 {
                     Trace out(_traceLevels->logger, _traceLevels->activatorCat);
-                    out << "couldn't find '" << path << "' executable.";
+                    out << "could not find '" << path << "' executable.";
                 }
-                throw runtime_error("Couldn't find '" + path + "' executable.");
+                throw runtime_error("Could not find '" + path + "' executable.");
             }
             path = wstringToString(absbuf);
         }
@@ -404,7 +469,7 @@ Activator::activate(
                 out << "cannot convert '" << pwd << "' into an absolute path";
             }
             throw runtime_error(
-                "The server working directory path '" + pwd + "' can't be converted into an absolute path.");
+                "The server working directory path '" + pwd + "' cannot be converted into an absolute path.");
         }
         pwd = wstringToString(absbuf);
     }
@@ -612,7 +677,7 @@ Activator::activate(
         string message = IceInternal::lastErrorToString();
 
         Ice::Warning out(_traceLevels->logger);
-        out << "server activation failed for '" << name << "':\ncouldn't register wait callback\n" << message;
+        out << "server activation failed for '" << name << "':\ncould not register wait callback\n" << message;
 
         //
         // The wait callback was not registered, so this entry will never be reaped. Close the process
@@ -710,6 +775,20 @@ Activator::activate(
     //
     const char* pwdCStr = pwd.c_str();
 
+    //
+    // Compute the fallback descriptor-close bound before fork(), so the child has a finite bound if it cannot use
+    // close_range (and doesn't need to call getrlimit() itself). Prefer the soft RLIMIT_NOFILE — the kernel never
+    // allocates a descriptor at or above it — capped so the loop stays bounded even under a huge or unlimited limit.
+    //
+    long maxFdToClose = 1 << 20;
+    {
+        rlimit fdLimit{};
+        if (getrlimit(RLIMIT_NOFILE, &fdLimit) == 0 && fdLimit.rlim_cur < static_cast<rlim_t>(maxFdToClose))
+        {
+            maxFdToClose = static_cast<long>(fdLimit.rlim_cur);
+        }
+    }
+
     pid_t pid = fork();
     if (pid == -1)
     {
@@ -792,23 +871,12 @@ Activator::activate(
         setpgid(0, 0);
 
         //
-        // Close all file descriptors, except for standard input,
-        // standard output, standard error, and the write side
-        // of the newly created pipe.
+        // Close all file descriptors, except for standard input, standard
+        // output, standard error, and the write ends of the two pipes created
+        // above: fds[1], kept open across exec so the node detects the server's
+        // termination, and errorFds[1], used to report pre-exec errors.
         //
-        int maxFd = static_cast<int>(sysconf(_SC_OPEN_MAX));
-        if (maxFd <= 0)
-        {
-            maxFd = numeric_limits<int>::max();
-        }
-
-        for (int fd = 3; fd < maxFd; ++fd)
-        {
-            if (fd != fds[1] && fd != errorFds[1])
-            {
-                close(fd);
-            }
-        }
+        closeInheritedDescriptors(fds[1], errorFds[1], maxFdToClose);
 
         for (int i = 0; i < env.argc; i++) // NOLINT(clang-analyzer-unix.Malloc)
         {
@@ -868,7 +936,7 @@ Activator::activate(
         string message;
 
         // We keep the Activator mutex locked for the whole activate.
-        while ((rs = read(errorFds[0], &s, 16)) > 0) // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+        while ((rs = read(errorFds[0], s, sizeof(s))) > 0) // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
         {
             message.append(s, static_cast<size_t>(rs));
         }
@@ -1316,6 +1384,7 @@ Activator::terminationListener()
 
         vector<Process> terminated;
         bool deactivated = false;
+        exception_ptr readException;
         {
             lock_guard lock(_mutex);
 
@@ -1346,9 +1415,21 @@ Activator::terminationListener()
                 //
                 // Read the message over the pipe.
                 //
-                while ((rs = read(fd, &s, 16)) > 0) // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+                while (true)
                 {
-                    message.append(s, static_cast<size_t>(rs));
+                    rs = read(fd, s, sizeof(s)); // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+                    if (rs > 0)
+                    {
+                        message.append(s, static_cast<size_t>(rs));
+                    }
+                    else if (rs == -1 && errno == EINTR)
+                    {
+                        continue; // Interrupted by a signal: retry.
+                    }
+                    else
+                    {
+                        break; // EOF or error.
+                    }
                 }
 
                 //
@@ -1363,7 +1444,9 @@ Activator::terminationListener()
                 {
                     if (errno != EAGAIN || message.empty())
                     {
-                        throw SyscallException{__FILE__, __LINE__, "read failed", errno};
+                        // Don't throw yet: the processes already moved to terminated must be notified first.
+                        readException = make_exception_ptr(SyscallException{__FILE__, __LINE__, "read failed", errno});
+                        break;
                     }
 
                     ++p;
@@ -1417,6 +1500,11 @@ Activator::terminationListener()
                 Ice::Warning out(_traceLevels->logger);
                 out << "unexpected exception raised by server '" << p.server->getId() << "' termination:\n" << ex;
             }
+        }
+
+        if (readException)
+        {
+            rethrow_exception(readException);
         }
 
         if (deactivated)

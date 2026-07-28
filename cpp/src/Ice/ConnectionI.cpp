@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <stdexcept>
+#include <utility>
 
 #ifdef ICE_HAS_BZIP2
 #    include <bzlib.h>
@@ -551,14 +552,14 @@ Ice::ConnectionI::close(function<void()> response, function<void(std::exception_
         {
             if (response)
             {
-                response();
+                executeCallback(response);
             }
         }
         else
         {
             if (exception)
             {
-                exception(closeException);
+                executeCallback([&] { exception(closeException); });
             }
         }
     }
@@ -763,18 +764,27 @@ Ice::ConnectionI::flushBatchRequestsAsync(
 void
 Ice::ConnectionI::setCloseCallback(CloseCallback callback)
 {
-    std::lock_guard lock(_mutex);
-    if (_state >= StateClosed)
+    // Holds the callback this call replaces, so that it is destroyed after the lock is released. Destroying a
+    // callback can run arbitrary user code - a language mapping may attach a finalizer to it - and that code can
+    // call back into this connection, which would deadlock on the non-recursive _mutex.
+    CloseCallback previous;
+
     {
-        if (callback)
+        std::lock_guard lock(_mutex);
+        if (_state >= StateClosed)
         {
-            auto self = shared_from_this();
-            _threadPool->execute([self, callback = std::move(callback)]() { self->closeCallback(callback); }, self);
+            if (callback)
+            {
+                auto self = shared_from_this();
+                _threadPool->execute(
+                    [self, callback = std::move(callback)]() { self->executeCallback(callback); },
+                    self);
+            }
         }
-    }
-    else
-    {
-        _closeCallback = std::move(callback);
+        else
+        {
+            previous = std::exchange(_closeCallback, std::move(callback));
+        }
     }
 }
 
@@ -787,11 +797,17 @@ Ice::ConnectionI::disableInactivityCheck() noexcept
 }
 
 void
-Ice::ConnectionI::closeCallback(const CloseCallback& callback)
+Ice::ConnectionI::executeCallback(const CloseCallback& callback) noexcept
+{
+    executeCallback([self = shared_from_this(), &callback] { callback(self); });
+}
+
+void
+Ice::ConnectionI::executeCallback(const std::function<void()>& callback) noexcept
 {
     try
     {
-        callback(shared_from_this());
+        callback();
     }
     catch (const std::exception& ex)
     {
@@ -1771,14 +1787,14 @@ Ice::ConnectionI::finish(bool close)
             {
                 if (pair.first)
                 {
-                    pair.first();
+                    executeCallback(pair.first);
                 }
             }
             else
             {
                 if (pair.second)
                 {
-                    pair.second(_exception);
+                    executeCallback([this, &pair] { pair.second(_exception); });
                 }
             }
         }
@@ -1787,7 +1803,7 @@ Ice::ConnectionI::finish(bool close)
 
     if (_closeCallback)
     {
-        closeCallback(_closeCallback);
+        executeCallback(_closeCallback);
         _closeCallback = nullptr;
     }
 

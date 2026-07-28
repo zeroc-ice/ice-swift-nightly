@@ -26,7 +26,7 @@ namespace Glacier2
     class ProxyVerifier final
     {
     public:
-        ProxyVerifier(Ice::CommunicatorPtr);
+        ProxyVerifier(Ice::CommunicatorPtr, int traceLevel);
         ~ProxyVerifier();
 
         //
@@ -39,8 +39,15 @@ namespace Glacier2
         const Ice::CommunicatorPtr _communicator;
         const int _traceLevel;
 
+        // The rules parsed from Glacier2.Filter.Address.Accept.
         std::vector<ProxyRule*> _acceptRules;
+
+        // The rules parsed from Glacier2.Filter.Address.Reject, plus a proxy length rule when
+        // Glacier2.Filter.ProxySizeMax is set.
         std::vector<ProxyRule*> _rejectRules;
+
+        // True when Glacier2.Filter.Address.Accept or Glacier2.Filter.Address.Reject is set.
+        bool _hasAddressFilters{false};
     };
 }
 #endif

@@ -104,7 +104,7 @@ class IceStormRep1TestCase(IceStormTestCase):
         self.runadmin(current, "destroy single")
 
         for replica in range(0, 3):
-            adminForReplica(replica, "destroy single", "error: couldn't find topic 'single'")
+            adminForReplica(replica, "destroy single", "error: could not find topic 'single'")
         current.writeln("ok")
 
         current.write("testing topic creation without replica... ")
@@ -151,13 +151,13 @@ class IceStormRep1TestCase(IceStormTestCase):
         self.runadmin(current, "destroy single")
 
         for replica in range(1, 3):
-            adminForReplica(replica, "destroy single", "error: couldn't find topic 'single'")
+            adminForReplica(replica, "destroy single", "error: could not find topic 'single'")
 
         adminForReplica(0, "destroy single", ["ConnectionRefused", "ConnectFailed"])
 
         startReplica(0)
 
-        adminForReplica(0, "destroy single", "error: couldn't find topic 'single'")
+        adminForReplica(0, "destroy single", "error: could not find topic 'single'")
         current.writeln("ok")
 
         current.write("testing topic destruction without master... ")
@@ -169,13 +169,13 @@ class IceStormRep1TestCase(IceStormTestCase):
         self.runadmin(current, "destroy single")
 
         for replica in range(0, 2):
-            adminForReplica(replica, "destroy single", "error: couldn't find topic 'single'")
+            adminForReplica(replica, "destroy single", "error: could not find topic 'single'")
 
         adminForReplica(2, "destroy single", ["ConnectionRefused", "ConnectFailed"])
 
         startReplica(2)
 
-        adminForReplica(2, "destroy single", "error: couldn't find topic 'single'")
+        adminForReplica(2, "destroy single", "error: could not find topic 'single'")
         current.writeln("ok")
 
         # Now test subscription/unsubscription on all replicas.
@@ -291,6 +291,49 @@ class IceStormRep1TestCase(IceStormTestCase):
         current.write("running cycle publishing test... ")
         sys.stdout.flush()
         runtest("--twoway", "--cycle")
+        current.writeln("ok")
+
+        current.write("testing replica rejoin with an outdated database... ")
+        sys.stdout.flush()
+
+        # Advance the database of replicas 1 and 2 by two updates while replica 0 is down. Bounce
+        # replica 1 first to force an election, so replicas 1 and 2 move a full generation ahead
+        # of replica 0.
+        stopReplica(0)
+        stopReplica(1)
+        startReplica(1)
+        self.runadmin(current, "create before1")
+        self.runadmin(current, "create before2")
+
+        # Swap replica 1 out for replica 0 and commit one update: replica 2, which holds the most
+        # recent database, coordinates a group in which every other replica is outdated.
+        stopReplica(1)
+        startReplica(0)
+        self.runadmin(current, "create after")
+
+        # When replica 1 rejoins, the election must not prefer its database over the group's, which
+        # saw the later 'after' creation.
+        startReplica(1)
+        for replica in [1, 0, 2]:
+            adminForReplica(replica, "create after", "error: topic 'after' exists")
+        current.writeln("ok")
+
+        current.write("testing full restart with a stale replica... ")
+        sys.stdout.flush()
+
+        # Make replica 2's database stale: create a topic while replica 2 is down.
+        stopReplica(2)
+        self.runadmin(current, "create fresh")
+
+        # Restart the group. The election must adopt the state of a replica that saw the topic
+        # creation, even though the stale replica has the highest node priority.
+        stopReplica(1)
+        stopReplica(0)
+        for replica in range(0, 3):
+            startReplica(replica)
+
+        for replica in range(0, 3):
+            adminForReplica(replica, "create fresh", "error: topic 'fresh' exists")
         current.writeln("ok")
 
         current.write("stopping replicas... ")

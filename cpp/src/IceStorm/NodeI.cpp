@@ -155,7 +155,9 @@ NodeI::start()
     unique_lock<mutex> lock(_mutex);
 
     _checkTask = make_shared<CheckTask>(shared_from_this());
-    _timer->schedule(_checkTask, chrono::seconds(static_cast<int64_t>(_nodes.size() - static_cast<size_t>(_id)) * 2));
+    // Stagger the initial check by node id. Node ids need not be contiguous, so clamp at zero to avoid an
+    // out-of-range (negative) delay when the id is larger than the node count.
+    _timer->schedule(_checkTask, chrono::seconds(std::max<int64_t>(0, static_cast<int64_t>(_nodes.size()) - _id) * 2));
     recovery(lock);
 }
 
@@ -339,7 +341,13 @@ NodeI::timeout()
     }
     if (failed)
     {
-        recovery();
+        unique_lock<mutex> lock(_mutex);
+        // Apply the recovery only if the coordinator and group we probed are still the node's: the node may have
+        // moved to another group while the mutex was released.
+        if (_coord == myCoord && _group == myGroup)
+        {
+            recovery(lock);
+        }
     }
 }
 
@@ -588,7 +596,12 @@ NodeI::mergeContinue()
         max = _max;
     }
 
-    // Prepare the LogUpdate for this generation.
+    // Prepare the LogUpdate for this generation. The new stamp must be larger than every LLU in the group, including
+    // our own.
+    if (myLlu > maxllu)
+    {
+        maxllu = myLlu;
+    }
     maxllu.generation++;
     maxllu.iteration = 0;
 
@@ -839,8 +852,10 @@ NodeI::accept(
     optional<Ice::ObjectPrx> observer,
     LogUpdate llu,
     int max,
-    const Ice::Current&)
+    const Ice::Current& current)
 {
+    checkNotNull(observer, __FILE__, __LINE__, current);
+
     // Verify that j exists in our node set.
     if (_nodes.find(j) == _nodes.end())
     {
@@ -968,6 +983,15 @@ NodeI::recovery(unique_lock<mutex>& lock, int64_t generation)
     // Ignore the recovery if the node has already advanced a
     // generation.
     if (generation != -1 && generation != _generation)
+    {
+        return;
+    }
+
+    // Never interrupt an election in progress: merge() and invitation() drive it with the mutex released between
+    // their phases and call recovery() themselves if it fails. A generation-stamped recovery — another thread
+    // reacting to a replication failure — is also ignored during a reorganization: the group it asks to abandon is
+    // already being replaced.
+    if (_state == NodeState::NodeStateElection || (generation != -1 && _state == NodeState::NodeStateReorganization))
     {
         return;
     }

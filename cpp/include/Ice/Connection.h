@@ -62,7 +62,8 @@ namespace Ice
         /// @remark The response and exception callbacks may be called synchronously (from the calling thread); in
         /// particular, this occurs when you call `close` on a connection that is already closed. The implementation
         /// always calls one of the two callbacks once; it never calls both. If closing the connection takes longer than
-        /// the configured close timeout, the connection is aborted with a CloseTimeoutException.
+        /// the configured close timeout, the connection is aborted with a CloseTimeoutException. The response and
+        /// exception callbacks must not throw any exception.
         virtual void
         close(std::function<void()> response, std::function<void(std::exception_ptr)> exception) noexcept = 0;
 
@@ -74,6 +75,7 @@ namespace Ice
         /// @tparam Prx The type of the proxy to create.
         /// @param id The identity of the target object.
         /// @return A fixed proxy with the provided identity.
+        /// @throws CommunicatorDestroyedException Thrown when the communicator has been destroyed.
         template<typename Prx = ObjectPrx, std::enable_if_t<std::is_base_of_v<ObjectPrx, Prx>, bool> = true>
         [[nodiscard]] Prx createProxy(Identity id) const
         {
@@ -86,6 +88,8 @@ namespace Ice
         /// The default object adapter of an incoming connection is the object adapter that created this connection;
         /// the default object adapter of an outgoing connection is the communicator's default object adapter.
         /// @param adapter The object adapter to associate with this connection.
+        /// @throws std::logic_error Thrown when this connection is an incoming connection: you can only call this
+        /// function on outgoing (client) connections.
         /// @see Communicator::getDefaultObjectAdapter
         /// @see #getAdapter
         virtual void setAdapter(const ObjectAdapterPtr& adapter) = 0;
@@ -103,15 +107,25 @@ namespace Ice
         /// This means all batch requests invoked on fixed proxies associated with the connection.
         /// @param compress Specifies whether or not the queued batch requests should be compressed before being sent
         /// over the wire.
+        /// @throws LocalException Thrown when the flush fails. For example, this function throws
+        /// CommunicatorDestroyedException when the communicator has been destroyed.
         void flushBatchRequests(CompressBatch compress);
 
         /// Flushes any pending batch requests for this connection.
         /// This means all batch requests invoked on fixed proxies associated with the connection.
         /// @param compress Specifies whether or not the queued batch requests should be compressed before being sent
         /// over the wire.
-        /// @param exception The exception callback.
-        /// @param sent The sent callback.
+        /// @param exception The exception callback. The Ice runtime calls this function from an Ice thread pool
+        /// thread. If you set InitializationData::executor, the executor determines the thread that executes this
+        /// function.
+        /// @param sent The sent callback. The Ice runtime calls this function when the batch requests are accepted by
+        /// the transport. When the batch requests are accepted synchronously, the Ice runtime calls this function from
+        /// the current thread and passes `true` as argument. When the batch requests are accepted asynchronously, the
+        /// Ice runtime calls this function from an Ice thread pool thread and passes `false` as argument. If you set
+        /// InitializationData::executor, the executor determines the thread that executes this function in the
+        /// asynchronous case.
         /// @return A function that can be called to cancel the invocation locally.
+        /// @throws CommunicatorDestroyedException Thrown synchronously when the communicator has been destroyed.
         virtual std::function<void()> flushBatchRequestsAsync(
             CompressBatch compress,
             std::function<void(std::exception_ptr)> exception,
@@ -122,6 +136,7 @@ namespace Ice
         /// @param compress Specifies whether or not the queued batch requests should be compressed before being sent
         /// over the wire.
         /// @return A future that becomes available when the flush completes.
+        /// @throws CommunicatorDestroyedException Thrown synchronously when the communicator has been destroyed.
         [[nodiscard]] std::future<void> flushBatchRequestsAsync(CompressBatch compress);
 
         /// Sets a close callback on the connection. The callback is called by the connection when it's closed.
@@ -150,10 +165,10 @@ namespace Ice
         /// @param sndSize The size of the send buffer.
         virtual void setBufferSize(int rcvSize, int sndSize) = 0;
 
-        /// Throws an exception that provides the reason for the closure of this connection. For example, this function
-        /// throws CloseConnectionException when the connection was closed gracefully by the peer; it throws
-        /// ConnectionAbortedException when the connection is aborted with #abort. This function does nothing if the
-        /// connection is not yet closed.
+        /// Throws the exception that provides the reason for the closure of this connection. Does nothing if the
+        /// connection is not yet closing or closed.
+        /// @throws CloseConnectionException Thrown when the connection was closed gracefully by the peer.
+        /// @throws ConnectionAbortedException Thrown when the connection was aborted, for example with #abort.
         virtual void throwException() const = 0;
 
     protected:
@@ -341,7 +356,8 @@ namespace Ice
         WSConnectionInfo(const WSConnectionInfo&) = delete;
         WSConnectionInfo& operator=(const WSConnectionInfo&) = delete;
 
-        /// The headers from the HTTP upgrade request.
+        /// The HTTP headers from the WebSocket upgrade handshake: the request headers for an incoming connection, and
+        /// the response headers for an outgoing connection.
         const HeaderDict headers;
 
         /// @private
