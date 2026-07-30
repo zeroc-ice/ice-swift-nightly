@@ -21,16 +21,6 @@ namespace Slice::Python
         Dispatch
     };
 
-    /// Represents the scope of an import statement—either required at runtime or only used for type hints.
-    enum class ImportScope
-    {
-        /// The import is required at runtime by the generated Python code.
-        RuntimeImport,
-
-        /// The import is only used for type hints and is not needed at runtime.
-        TypingImport
-    };
-
     // The context a type will be used in.
     enum class InterfaceTypeContext
     {
@@ -91,6 +81,9 @@ namespace Slice::Python
 
         /// Whether this code fragment is a package index file.
         bool isPackageIndex = false;
+
+        /// Whether the generated code references the IcePy module. Fragments that only define constants don't.
+        bool usesIcePy = true;
 
         /// The generated code.
         std::string code;
@@ -175,9 +168,6 @@ namespace Slice::Python
     /// @param p The Slice definition to get the meta-type name for.
     /// @return The name of the meta-type for the given Slice definition.
     std::string getMetaType(const SyntaxTreeBasePtr& p);
-
-    /// Helper method to emit the generated code that format the fields of a type in __repr__ implementation.
-    std::string formatFields(const DataMemberList& members);
 
     CodeFragment createCodeFragmentForPythonModule(const ContainedPtr& contained, const std::string& code);
 
