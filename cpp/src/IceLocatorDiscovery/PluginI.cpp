@@ -2,6 +2,7 @@
 
 #include "../Ice/Network.h" // For getInterfacesForMulticast
 #include "../Ice/Timer.h"
+#include "Ice/LocalExceptions.h"
 #include "Ice/LoggerUtil.h"
 #include "IceLocatorDiscovery/IceLocatorDiscovery.h"
 #include "IceLocatorDiscovery/Lookup.h"
@@ -83,9 +84,9 @@ namespace
 
         LookupPrx _lookup;
         vector<pair<LookupPrx, LookupReplyPrx>> _lookups;
-        chrono::milliseconds _timeout;
-        int _retryCount;
-        chrono::milliseconds _retryDelay;
+        const chrono::milliseconds _timeout;
+        const int _retryCount;
+        const chrono::milliseconds _retryDelay;
         const IceInternal::TimerPtr _timer;
         const int _traceLevel;
 
@@ -405,17 +406,26 @@ LocatorI::LocatorI(
       _locator(lookup->ice_getCommunicator()->getDefaultLocator()),
       _voidLocator(std::move(voidLocator))
 {
-    if (_timeout < chrono::milliseconds::zero())
+    if (_timeout <= chrono::milliseconds::zero())
     {
-        _timeout = chrono::milliseconds(300);
+        throw Ice::PropertyException{
+            __FILE__,
+            __LINE__,
+            "property 'IceLocatorDiscovery.Timeout' must be greater than 0"};
     }
     if (_retryCount < 0)
     {
-        _retryCount = 0;
+        throw Ice::PropertyException{
+            __FILE__,
+            __LINE__,
+            "property 'IceLocatorDiscovery.RetryCount' must be greater than or equal to 0"};
     }
     if (_retryDelay < chrono::milliseconds::zero())
     {
-        _retryDelay = chrono::milliseconds::zero();
+        throw Ice::PropertyException{
+            __FILE__,
+            __LINE__,
+            "property 'IceLocatorDiscovery.RetryDelay' must be greater than or equal to 0"};
     }
 }
 
