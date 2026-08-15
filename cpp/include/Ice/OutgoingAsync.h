@@ -25,7 +25,6 @@
 #    pragma warning(disable : 4251) // class ... needs to have dll-interface to be used by clients of class ...
 #elif defined(__clang__)
 #    pragma clang diagnostic push
-// See #2747
 #    pragma clang diagnostic ignored "-Wshadow-uncaptured-local"
 #    pragma clang diagnostic ignored "-Wweak-vtables"
 #endif
@@ -143,7 +142,7 @@ namespace IceInternal
     //
     // Base class for proxy based invocations. This class handles the
     // retry for proxy invocations. It also ensures the child observer is
-    // correct notified of failures and make sure the retry task is
+    // correctly notified of failures and makes sure the retry task is
     // correctly canceled when the invocation completes.
     //
     class ICE_API ProxyOutgoingAsyncBase : public OutgoingAsyncBase, public TimerTask
@@ -155,7 +154,11 @@ namespace IceInternal
         bool exception(std::exception_ptr) override;
 
         void retryException();
+
+        // Retries the invocation; when the retry attempt fails, completes the invocation with the exception. This
+        // function never throws.
         void retry();
+
         void abort(std::exception_ptr);
 
         std::shared_ptr<ProxyOutgoingAsyncBase> shared_from_this()

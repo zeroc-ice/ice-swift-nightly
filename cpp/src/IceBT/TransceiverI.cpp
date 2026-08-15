@@ -50,7 +50,7 @@ IceBT::TransceiverI::closing(bool initiator, exception_ptr)
 {
     //
     // If we are initiating the connection closure, wait for the peer
-    // to close the TCP/IP connection. Otherwise, close immediately.
+    // to close the Bluetooth connection. Otherwise, close immediately.
     //
     return initiator ? IceInternal::SocketOperationRead : IceInternal::SocketOperationNone;
 }
@@ -141,6 +141,9 @@ IceBT::TransceiverI::getInfo(bool incoming, string adapterName, string connectio
         int remoteChannel;
         fdToAddressAndChannel(_stream->fd(), localAddress, localChannel, remoteAddress, remoteChannel);
 
+        int rcvSize = IceInternal::getRecvBufferSizeNoThrow(_stream->fd());
+        int sndSize = IceInternal::getSendBufferSizeNoThrow(_stream->fd());
+
         return make_shared<ConnectionInfo>(
             incoming,
             std::move(adapterName),
@@ -150,8 +153,8 @@ IceBT::TransceiverI::getInfo(bool incoming, string adapterName, string connectio
             std::move(remoteAddress),
             remoteChannel,
             _uuid,
-            IceInternal::getRecvBufferSize(_stream->fd()),
-            IceInternal::getSendBufferSize(_stream->fd()));
+            rcvSize,
+            sndSize);
     }
 }
 
@@ -163,7 +166,16 @@ IceBT::TransceiverI::checkSendSize(const IceInternal::Buffer&)
 void
 IceBT::TransceiverI::setBufferSize(int rcvSize, int sndSize)
 {
-    _stream->setBufferSize(_stream->fd(), rcvSize, sndSize);
+    try
+    {
+        _stream->setBufferSize(_stream->fd(), rcvSize, sndSize);
+    }
+    catch (const Ice::SocketException&)
+    {
+        // The failing call closed the fd.
+        _stream->clearFd();
+        throw;
+    }
 }
 
 IceBT::TransceiverI::TransceiverI(InstancePtr instance, StreamSocketPtr stream, ConnectionPtr conn, string uuid)
@@ -177,7 +189,7 @@ IceBT::TransceiverI::TransceiverI(InstancePtr instance, StreamSocketPtr stream, 
 
 IceBT::TransceiverI::TransceiverI(InstancePtr instance, string addr, string uuid)
     : _instance(std::move(instance)),
-      _stream(new StreamSocket(_instance, INVALID_SOCKET)),
+      _stream(new StreamSocket(_instance)),
       _addr(std::move(addr)),
       _uuid(std::move(uuid)),
       _needConnect(true)
@@ -194,9 +206,20 @@ IceBT::TransceiverI::connectCompleted(int fd, const ConnectionPtr& conn)
         if (!_closed)
         {
             _connection = conn;
-            _stream->setFd(fd);
+            try
+            {
+                _stream->setFd(fd);
+            }
+            catch (...)
+            {
+                //
+                // A throwing setFd does not record the fd, so there is nothing to clean up here. initialize()
+                // rethrows this exception and the connection establishment fails with the actual error.
+                //
+                _exception = current_exception();
+            }
             //
-            // Triggers a call to write() from a different thread.
+            // Wake up the thread pool, which resumes the connection establishment by calling initialize().
             //
             _stream->ready(IceInternal::SocketOperationConnect, true);
             return;
@@ -215,12 +238,18 @@ void
 IceBT::TransceiverI::connectFailed(std::exception_ptr ex)
 {
     lock_guard lock(_mutex);
-    //
-    // Save the exception - it will be raised in initialize().
-    //
-    _exception = ex;
-    //
-    // Triggers a call to write() from a different thread.
-    //
-    _stream->ready(IceInternal::SocketOperationConnect, true);
+
+    // Ignore a failure delivered after the transceiver was closed: there is no connection establishment left to
+    // resume.
+    if (!_closed)
+    {
+        //
+        // Save the exception - it will be rethrown in initialize().
+        //
+        _exception = ex;
+        //
+        // Wake up the thread pool, which resumes the connection establishment by calling initialize().
+        //
+        _stream->ready(IceInternal::SocketOperationConnect, true);
+    }
 }

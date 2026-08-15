@@ -387,23 +387,35 @@ namespace DataStormI
 
         [[nodiscard]] Ice::ByteSeq encodeValue(const Ice::CommunicatorPtr& communicator) final
         {
-            assert(_hasValue || event == DataStorm::SampleEvent::Remove);
+            // A remove sample carries no value.
+            if (event == DataStorm::SampleEvent::Remove)
+            {
+                return {};
+            }
+
+            assert(_hasValue);
             return EncoderT<Value>::encode(communicator, _value);
         }
 
         void decode(const Ice::CommunicatorPtr& communicator) final
         {
-            if (!_encodedValue.empty())
+            // A remove sample carries no value.
+            if (event == DataStorm::SampleEvent::Remove)
             {
-                _hasValue = true;
-                _value = DecoderT<Value>::decode(communicator, _encodedValue);
-                _encodedValue.clear();
+                return;
             }
+
+            // A custom Encoder may encode a value to zero bytes; the Decoder defines the meaning of empty input.
+            _value = DecoderT<Value>::decode(communicator, _encodedValue);
+            _hasValue = true;
+            _encodedValue.clear();
         }
 
     private:
         bool _hasValue;
-        Value _value;
+        // Value-initialized because getValue() returns this member for a value-less sample, where it is documented to
+        // return a default value; a scalar type would otherwise be indeterminate.
+        Value _value{};
     };
 
     template<typename Key, typename Value, typename UpdateTag> class SampleFactoryT final : public SampleFactory

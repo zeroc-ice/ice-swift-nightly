@@ -9,6 +9,8 @@
 #include "TopicI.h"
 #include "TraceUtil.h"
 
+#include <algorithm>
+
 using namespace std;
 using namespace DataStormI;
 using namespace DataStormContract;
@@ -36,6 +38,51 @@ namespace
         ObjectPtr _servant;
         shared_ptr<CallbackExecutor> _executor;
     };
+
+    // Collapses the per-key batches produced by TopicI::attachElementsAck into one DataSamples per writer-reader pair.
+    // A multi-key writer produces one batch per key, all under the same writer id and addressed to the same reader
+    // (peerId); merging them and ordering the result by sample id lets the reader's policies (SendTime, sampleCount,
+    // history clearing) observe the writer's global order. Duplicate sample ids (a sample matched by overlapping
+    // filters) are removed. The first-seen order of the pairs is preserved. An empty batch is kept: it still marks its
+    // reader initialized and enables the reader's live sample delivery.
+    DataSamplesSeq mergeInitSamples(DataSamplesSeq batches)
+    {
+        DataSamplesSeq merged;
+        map<pair<int64_t, int64_t>, size_t> index;
+        for (auto& batch : batches)
+        {
+            auto pairKey = make_pair(batch.id, batch.peerId);
+            auto p = index.find(pairKey);
+            if (p == index.end())
+            {
+                index.emplace(pairKey, merged.size());
+                merged.push_back(std::move(batch));
+            }
+            else
+            {
+                auto& samples = merged[p->second].samples;
+                samples.insert(samples.end(), batch.samples.begin(), batch.samples.end());
+            }
+        }
+
+        for (auto& batch : merged)
+        {
+            // stable_sort so that when two batches carry the same sample id, unique keeps the first in batch order.
+            // getSamples resolves the earliest delivered sample of each key to a full value per batch, so keeping the
+            // first-seen copy preserves that resolved base rather than an arbitrary duplicate.
+            stable_sort(
+                batch.samples.begin(),
+                batch.samples.end(),
+                [](const DataSample& lhs, const DataSample& rhs) { return lhs.id < rhs.id; });
+            batch.samples.erase(
+                unique(
+                    batch.samples.begin(),
+                    batch.samples.end(),
+                    [](const DataSample& lhs, const DataSample& rhs) { return lhs.id == rhs.id; }),
+                batch.samples.end());
+        }
+        return merged;
+    }
 }
 
 SessionI::SessionI(shared_ptr<Instance> instance, shared_ptr<NodeI> parent, NodePrx node, SessionPrx proxy)
@@ -51,7 +98,7 @@ SessionI::SessionI(shared_ptr<Instance> instance, shared_ptr<NodeI> parent, Node
 void
 SessionI::init()
 {
-    // Even though the node register a default servant for sessions, we still need to register the session servant
+    // Even though the node registers a default servant for sessions, we still need to register the session servant
     // explicitly here to ensure collocation works. The default servant from the node is used for facet calls.
     _instance->getObjectAdapter()->add(
         make_shared<DispatchInterceptorI>(shared_from_this(), _instance->getCallbackExecutor()),
@@ -111,16 +158,9 @@ SessionI::announceTopics(TopicInfoSeq topics, bool, const Current&)
         auto p = _topics.begin();
         while (p != _topics.end())
         {
-            auto detach = [this, topicId = p->first](TopicI* topic, TopicSubscriber& subscriber)
+            auto detach = [this, topicId = p->first](const shared_ptr<TopicI>& topic)
             {
-                if (subscriber.getAll().empty())
-                {
-                    // No element subscriptions: nothing to detach. The element subscribers are also what keeps the
-                    // topic alive (each element holds its parent topic), so the topic must not be dereferenced here.
-                    return;
-                }
                 unique_lock<mutex> topicLock(topic->getMutex());
-                _topicLock = &topicLock;
                 if (topic->isDestroyed())
                 {
                     // The topic is being destroyed: TopicI::disconnect detaches its elements only while the
@@ -134,7 +174,6 @@ SessionI::announceTopics(TopicInfoSeq topics, bool, const Current&)
                     // session from the topic's listeners.
                     topic->detach(topicId, shared_from_this());
                 }
-                _topicLock = nullptr;
             };
             if (p->second.reap(_sessionInstanceId, detach))
             {
@@ -179,12 +218,7 @@ SessionI::attachTopic(TopicSpec spec, const Current&)
                 // If the topic spec has tags, decode them and add them to the subscriber.
                 if (!spec.tags.empty())
                 {
-                    auto& subscriber = _topics.at(spec.id).getSubscriber(topic.get());
-                    for (const auto& tag : spec.tags)
-                    {
-                        subscriber.tags[tag.id] =
-                            topic->getTagFactory()->decode(_instance->getCommunicator(), tag.value);
-                    }
+                    decodeTags(topic, spec.tags, _topics.at(spec.id).getSubscriber(topic).tags);
                 }
 
                 // Provide the local tags to the remote topic by calling attachTagsAsync.
@@ -203,8 +237,9 @@ SessionI::attachTopic(TopicSpec spec, const Current&)
                         Trace out(_traceLevels->logger, _traceLevels->sessionCat);
                         out << _id << ": matched elements '" << spec << "' on '" << topic << "'";
                     }
-                    // Don't wait for the response here, the peer session will send an ack.
-                    _session->attachElementsAsync(topic->getId(), specs, true, nullptr);
+                    // Don't wait for the response here, the peer session will send an ack. The request is addressed
+                    // to the remote topic instance we are attaching to (spec.id).
+                    _session->attachElementsAsync(topic->getId(), spec.id, specs, true, nullptr);
                 }
             });
     }
@@ -225,10 +260,15 @@ SessionI::detachTopic(int64_t id, const Current&)
         return;
     }
 
-    for (auto& [topic, _] : t->second.getSubscribers())
+    for (auto& [topicRef, _] : t->second.getSubscribers())
     {
+        auto topic = topicRef.lock();
+        if (!topic)
+        {
+            continue;
+        }
+
         unique_lock<mutex> topicLock(topic->getMutex());
-        _topicLock = &topicLock;
         if (topic->isDestroyed())
         {
             // The topic is being destroyed: TopicI::disconnect detaches its elements only while the subscriber
@@ -244,7 +284,6 @@ SessionI::detachTopic(int64_t id, const Current&)
             }
             topic->detach(id, shared_from_this());
         }
-        _topicLock = nullptr;
     }
 
     // Erase the topic
@@ -262,7 +301,7 @@ SessionI::attachTags(int64_t topicId, ElementInfoSeq tags, bool initialize, cons
 
     runWithTopics(
         topicId,
-        [&](TopicI* topic, TopicSubscriber& subscriber)
+        [&](const shared_ptr<TopicI>& topic, TopicSubscriber& subscriber)
         {
             if (_traceLevels->session > 2)
             {
@@ -270,14 +309,15 @@ SessionI::attachTags(int64_t topicId, ElementInfoSeq tags, bool initialize, cons
                 out << _id << ": attaching tags '[" << tags << "]@" << topicId << "' on topic '" << topic << "'";
             }
 
+            // An initializing call replaces the subscriber's tags, so it decodes into a temporary and installs it once
+            // every tag is decoded; the subscriber keeps its current tags until then. Any other call adds to the tags
+            // the subscriber already holds, and decodes into them directly.
+            map<int64_t, shared_ptr<Tag>> replacement;
+            decodeTags(topic, tags, initialize ? replacement : subscriber.tags);
+
             if (initialize)
             {
-                subscriber.tags.clear();
-            }
-
-            for (const auto& tag : tags)
-            {
-                subscriber.tags[tag.id] = topic->getTagFactory()->decode(_instance->getCommunicator(), tag.value);
+                subscriber.tags = std::move(replacement);
             }
         });
 }
@@ -293,7 +333,7 @@ SessionI::detachTags(int64_t topicId, LongSeq tags, const Current&)
 
     runWithTopics(
         topicId,
-        [&](TopicI* topic, TopicSubscriber& subscriber)
+        [&](const shared_ptr<TopicI>& topic, TopicSubscriber& subscriber)
         {
             if (_traceLevels->session > 2)
             {
@@ -319,7 +359,7 @@ SessionI::announceElements(int64_t topicId, ElementInfoSeq elements, const Curre
 
     runWithTopics(
         topicId,
-        [&](TopicI* topic, TopicSubscriber&)
+        [&](const shared_ptr<TopicI>& topic, TopicSubscriber&)
         {
             if (_traceLevels->session > 2)
             {
@@ -337,13 +377,14 @@ SessionI::announceElements(int64_t topicId, ElementInfoSeq elements, const Curre
                     out << _id << ": announcing elements matched '[" << specs << "]@" << topicId << "' on topic '"
                         << topic << "'";
                 }
-                _session->attachElementsAsync(topic->getId(), specs, false, nullptr);
+                // Addressed to the remote topic instance that announced these elements (topicId).
+                _session->attachElementsAsync(topic->getId(), topicId, specs, false, nullptr);
             }
         });
 }
 
 void
-SessionI::attachElements(int64_t topicId, ElementSpecSeq elements, bool initialize, const Current&)
+SessionI::attachElements(int64_t topicId, int64_t peerTopicId, ElementSpecSeq elements, bool initialize, const Current&)
 {
     lock_guard<mutex> lock(_mutex);
     if (!_session)
@@ -352,12 +393,12 @@ SessionI::attachElements(int64_t topicId, ElementSpecSeq elements, bool initiali
     }
 
     auto now = chrono::system_clock::now();
-    // For each local topic that has a subscriber for the remote topic:
-    // - Attach the elements to the topic.
-    // - ACK the attached elements to the peer session.
+    // Attach the elements to the addressed local topic and ack them to the peer. Routing to exactly the addressed
+    // topic (rather than every same-name topic) keeps the echoed element and key ids unambiguous.
     runWithTopics(
         topicId,
-        [&](TopicI* topic, TopicSubscriber& subscriber)
+        peerTopicId,
+        [&](const shared_ptr<TopicI>& topic, TopicSubscriber& subscriber)
         {
             if (_traceLevels->session > 2)
             {
@@ -388,13 +429,14 @@ SessionI::attachElements(int64_t topicId, ElementSpecSeq elements, bool initiali
                     out << _id << ": attaching elements matched '[" << specAck << "]@" << topicId << "' on topic '"
                         << topic << "'";
                 }
-                _session->attachElementsAckAsync(topic->getId(), specAck, nullptr);
+                // Addressed back to the remote topic instance that sent attachElements (topicId).
+                _session->attachElementsAckAsync(topic->getId(), topicId, specAck, nullptr);
             }
         });
 }
 
 void
-SessionI::attachElementsAck(int64_t topicId, ElementSpecAckSeq elements, const Current&)
+SessionI::attachElementsAck(int64_t topicId, int64_t peerTopicId, ElementSpecAckSeq elements, const Current&)
 {
     lock_guard<mutex> lock(_mutex);
     if (!_session)
@@ -404,7 +446,8 @@ SessionI::attachElementsAck(int64_t topicId, ElementSpecAckSeq elements, const C
     auto now = chrono::system_clock::now();
     runWithTopics(
         topicId,
-        [&](TopicI* topic, TopicSubscriber&)
+        peerTopicId,
+        [&](const shared_ptr<TopicI>& topic, TopicSubscriber&)
         {
             if (_traceLevels->session > 2)
             {
@@ -414,16 +457,20 @@ SessionI::attachElementsAck(int64_t topicId, ElementSpecAckSeq elements, const C
             }
 
             LongSeq removedIds;
-            auto samples = topic->attachElementsAck(topicId, elements, shared_from_this(), *_session, now, removedIds);
-            if (!samples.empty())
+            auto initializationBatches =
+                topic->attachElementsAck(topicId, elements, shared_from_this(), *_session, now, removedIds);
+            if (!initializationBatches.empty())
             {
+                // Collapse the per-key batches into one addressed DataSamples per writer-reader pair before sending.
+                initializationBatches = mergeInitSamples(std::move(initializationBatches));
                 if (_traceLevels->session > 2)
                 {
                     Trace out(_traceLevels->logger, _traceLevels->sessionCat);
-                    out << _id << ": initializing elements '[" << samples << "]@" << topicId << "' on topic '" << topic
-                        << "'";
+                    out << _id << ": initializing elements '[" << initializationBatches << "]@" << topicId
+                        << "' on topic '" << topic << "'";
                 }
-                _session->initSamplesAsync(topic->getId(), samples, nullptr);
+                // Addressed back to the remote topic instance that sent the ack (topicId).
+                _session->initSamplesAsync(topic->getId(), topicId, initializationBatches, nullptr);
             }
 
             if (!removedIds.empty())
@@ -444,7 +491,7 @@ SessionI::detachElements(int64_t id, LongSeq elements, const Current&)
 
     runWithTopics(
         id,
-        [&](TopicI* topic, TopicSubscriber& subscriber)
+        [&](const shared_ptr<TopicI>& topic, TopicSubscriber& subscriber)
         {
             if (_traceLevels->session > 2)
             {
@@ -475,7 +522,7 @@ SessionI::detachElements(int64_t id, LongSeq elements, const Current&)
 }
 
 void
-SessionI::initSamples(int64_t topicId, DataSamplesSeq samplesSeq, const Current&)
+SessionI::initSamples(int64_t topicId, int64_t peerTopicId, DataSamplesSeq initializationBatches, const Current&)
 {
     lock_guard<mutex> lock(_mutex);
     if (!_session)
@@ -484,84 +531,122 @@ SessionI::initSamples(int64_t topicId, DataSamplesSeq samplesSeq, const Current&
     }
 
     auto now = chrono::system_clock::now();
-    auto communicator = _instance->getCommunicator();
-    for (const auto& samples : samplesSeq)
+
+    // One initSamples request carries a whole initialization round. Each DataSamples is addressed to a specific reader
+    // element (peerId), and its samples were merged across the reader's keys and ordered by the sender, so route each
+    // batch to exactly that reader. This delivers every key's samples to a multi-key or any-key reader in a single
+    // merged batch, and tells two readers of one writer apart by their element id. An empty batch still marks its
+    // reader initialized, enabling the reader's live sample delivery.
+    for (const auto& initializationBatch : initializationBatches)
     {
         runWithTopics(
             topicId,
-            [&](TopicI* topic, TopicSubscriber& subscriber)
+            peerTopicId,
+            [&](const shared_ptr<TopicI>& topic, TopicSubscriber& subscriber)
             {
-                ElementSubscribers* elementSubscribers = subscriber.get(samples.id);
-                if (elementSubscribers)
+                ElementSubscribers* elementSubscribers = subscriber.get(initializationBatch.id);
+                if (!elementSubscribers)
                 {
-                    if (_traceLevels->session > 2)
-                    {
-                        Trace out(_traceLevels->logger, _traceLevels->sessionCat);
-                        out << _id << ": initializing samples from '" << samples.id << "'"
-                            << " on [";
-                        for (auto q = elementSubscribers->getSubscribers().begin();
-                             q != elementSubscribers->getSubscribers().end();
-                             ++q)
-                        {
-                            if (q != elementSubscribers->getSubscribers().begin())
-                            {
-                                out << ", ";
-                            }
-                            out << q->first;
-                            if (!q->second.facet.empty())
-                            {
-                                out << ":" << q->second.facet;
-                            }
-                        }
-                        out << "]";
-                    }
+                    return;
+                }
 
-                    vector<shared_ptr<Sample>> samplesI;
-                    samplesI.reserve(samples.samples.size());
-                    const auto& sampleFactory = topic->getSampleFactory();
-                    for (const auto& sample : samples.samples)
+                // Initialize the reader element this batch is addressed to; the writer's other readers are initialized
+                // by their own batches.
+                auto& subscribers = elementSubscribers->getSubscribers();
+                auto q = find_if(
+                    subscribers.begin(),
+                    subscribers.end(),
+                    [&](const auto& s) { return s.first->getId() == initializationBatch.peerId; });
+                if (q == subscribers.end() || q->second.initialized)
+                {
+                    return;
+                }
+                auto& [element, elementSubscriber] = *q;
+
+                if (_traceLevels->session > 2)
+                {
+                    Trace out(_traceLevels->logger, _traceLevels->sessionCat);
+                    out << _id << ": initializing samples from 'e" << initializationBatch.id << "' on '" << element
+                        << "'";
+                }
+
+                if (initializationBatch.samples.empty())
+                {
+                    // An empty batch carries no history; mark the reader initialized so its live samples can flow.
+                    elementSubscriber.initialized = true;
+                    return;
+                }
+
+                vector<shared_ptr<Sample>> samplesI;
+                samplesI.reserve(initializationBatch.samples.size());
+                const auto& sampleFactory = topic->getSampleFactory();
+                for (const auto& sample : initializationBatch.samples)
+                {
+                    // A key id of 0 means the key is marshaled inline in keyValue, per DataSample. Don't infer
+                    // that from an empty keyValue: a custom key encoder can legitimately encode a key to zero
+                    // bytes, and key ids start at 1.
+                    shared_ptr<Key> key;
+                    if (sample.keyId != 0)
                     {
-                        shared_ptr<Key> key;
-                        if (sample.keyValue.empty())
-                        {
-                            key = subscriber.keys[sample.keyId].first;
-                        }
-                        else
+                        key = subscriber.findKey(sample.keyId);
+                    }
+                    else
+                    {
+                        try
                         {
                             key = topic->getKeyFactory()->decode(_instance->getCommunicator(), sample.keyValue);
                         }
-                        assert(key);
-
-                        samplesI.push_back(sampleFactory->create(
-                            _id,
-                            elementSubscribers->name,
-                            sample.id,
-                            sample.event,
-                            key,
-                            subscriber.tags[sample.tag],
-                            sample.value,
-                            sample.timestamp));
-                    }
-
-                    for (auto& [element, elementSubscriber] : elementSubscribers->getSubscribers())
-                    {
-                        if (!elementSubscriber.initialized)
+                        catch (const std::exception& ex)
                         {
-                            elementSubscriber.initialized = true;
-                            if (!samplesI.empty())
-                            {
-                                elementSubscriber.lastId = samplesI.back()->id;
-                                element->initSamples(
-                                    samplesI,
-                                    topicId,
-                                    samples.id,
-                                    elementSubscribers->priority,
-                                    now,
-                                    samples.id < 0);
-                            }
+                            // The key factory runs the application's decoder. Abandon the batch and leave the reader
+                            // uninitialized, like the unknown-key case below, so a later redelivery can still
+                            // initialize it. The session protocol is fire-and-forget, so a local warning is the only
+                            // way to report the failure.
+                            Warning out(_traceLevels->logger);
+                            out << "discarded the initialization samples for '" << element
+                                << "': the key could not be decoded:\n"
+                                << ex.what();
+                            return;
                         }
                     }
+
+                    assert(key);
+                    if (!key)
+                    {
+                        // The batch is addressed to a reader that subscribed to this key, so the session always
+                        // knows it. Abandon the batch rather than build a key-less sample, and leave the reader
+                        // uninitialized so a later redelivery can still initialize it.
+                        if (_traceLevels->session > 0)
+                        {
+                            Trace out(_traceLevels->logger, _traceLevels->sessionCat);
+                            out << _id << ": discarding initialization batch from 'e" << initializationBatch.id << '@'
+                                << topicId << "': unknown key '" << sample.keyId << "'";
+                        }
+                        return;
+                    }
+
+                    samplesI.push_back(sampleFactory->create(
+                        _id,
+                        elementSubscribers->name,
+                        sample.id,
+                        sample.event,
+                        key,
+                        subscriber.findTag(sample.tag),
+                        sample.value,
+                        sample.timestamp));
                 }
+
+                // Mark the reader initialized only after its samples are decoded and built: if decoding or sample
+                // construction above throws, the reader stays uninitialized so a later redelivery can initialize it.
+                elementSubscriber.initialized = true;
+                elementSubscriber.lastId = samplesI.back()->id;
+                element->initSamples(
+                    samplesI,
+                    topicId,
+                    initializationBatch.id,
+                    elementSubscribers->priority,
+                    now,
+                    initializationBatch.id < 0);
             });
     }
 }
@@ -612,6 +697,9 @@ SessionI::connected(SessionPrx session, const ConnectionPtr& newConnection, cons
 
     ++_sessionInstanceId;
 
+    // The session is connected: any attempt still in flight is superseded.
+    ++_connectAttempt;
+
     if (_traceLevels->session > 0)
     {
         Trace out(_traceLevels->logger, _traceLevels->sessionCat);
@@ -634,13 +722,6 @@ SessionI::connected(SessionPrx session, const ConnectionPtr& newConnection, cons
             // Ignore
         }
     }
-}
-
-bool
-SessionI::disconnected(const ConnectionPtr& connection, exception_ptr ex)
-{
-    lock_guard<mutex> lock(_mutex);
-    return disconnectedImpl(connection, ex);
 }
 
 bool
@@ -709,9 +790,13 @@ SessionI::disconnectedImpl(const ConnectionPtr& connection, exception_ptr ex)
     for (const auto& [topicId, _] : _topics)
     {
         // The analyzer falsely flags the lambda's captures as undefined: it loses track of the closure once it
-        // is stored in runWithTopics' std::function parameter.
-        // NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
-        runWithTopics(topicId, [topicId, self](TopicI* topic, TopicSubscriber&) { topic->detach(topicId, self); });
+        // is stored in runWithTopics' std::function parameter. The suppression spans the whole call because the
+        // analyzer reports the diagnostic inside the lambda body, not on the runWithTopics line.
+        // NOLINTBEGIN(clang-analyzer-core.NullDereference)
+        runWithTopics(
+            topicId,
+            [topicId, self](const shared_ptr<TopicI>& topic, TopicSubscriber&) { topic->detach(topicId, self); });
+        // NOLINTEND(clang-analyzer-core.NullDereference)
     }
 
     // The peer's wire disconnected() op is not a connection close, so unregister the session that connected()
@@ -728,10 +813,57 @@ SessionI::disconnectedImpl(const ConnectionPtr& connection, exception_ptr ex)
 }
 
 bool
-SessionI::retry(NodePrx node, exception_ptr exception)
+SessionI::sessionCreationFailed(NodePrx node, exception_ptr exception, int64_t connectAttempt)
 {
     lock_guard<mutex> lock(_mutex);
+
+    if (connectAttempt != _connectAttempt)
+    {
+        // A reply from a superseded attempt: the session has connected since, or an earlier failure was already
+        // accounted for and a fresh attempt scheduled. Acting on it would consume the current attempt's retry budget
+        // for an outcome that no longer applies, and a burst of such replies exhausts the budget in milliseconds and
+        // destroys a session that is reconnecting normally.
+        if (_traceLevels->session > 1)
+        {
+            Trace out(_traceLevels->logger, _traceLevels->sessionCat);
+            out << _id << ": ignoring a session creation failure from attempt " << connectAttempt
+                << ", the current attempt is " << _connectAttempt;
+        }
+        return true;
+    }
+
+    // AlreadyConnected reports that the peer already has a session with this node, so it is a failure only when this
+    // session is not connected. checkSessionImpl can disconnect the session when it finds the connection already
+    // closed, which is why the check runs here rather than in the caller: it must not be separated from the decision
+    // it feeds, and a disconnect discovered by it must still reach retryImpl below.
+    if (exception)
+    {
+        try
+        {
+            rethrow_exception(exception);
+        }
+        catch (const SessionCreationException& ex)
+        {
+            if (ex.error == SessionCreationError::AlreadyConnected && checkSessionImpl())
+            {
+                // A concurrent session creation from the peer succeeded, no need to retry.
+                return true;
+            }
+        }
+        catch (const std::exception&)
+        {
+            // Any other failure is handled by retryImpl below.
+        }
+    }
+
     return retryImpl(std::move(node), std::move(exception));
+}
+
+int64_t
+SessionI::connectAttempt() const
+{
+    lock_guard<mutex> lock(_mutex);
+    return _connectAttempt;
 }
 
 bool
@@ -745,6 +877,10 @@ SessionI::retryImpl(NodePrx node, exception_ptr exception)
     {
         return false;
     }
+
+    // This failure is about to be accounted for, either by scheduling a fresh attempt or by giving up. Either way
+    // the attempt it belongs to is finished, so later replies from it must not be counted again.
+    ++_connectAttempt;
 
     if (exception)
     {
@@ -898,10 +1034,15 @@ SessionI::destroyImpl(const exception_ptr& ex)
         auto self = shared_from_this();
         for (auto& [topicId, subscribers] : _topics)
         {
-            for (auto& [topic, _] : subscribers.getSubscribers())
+            for (auto& [topicRef, _] : subscribers.getSubscribers())
             {
+                auto topic = topicRef.lock();
+                if (!topic)
+                {
+                    continue;
+                }
+
                 unique_lock<mutex> topicLock(topic->getMutex());
-                _topicLock = &topicLock;
                 if (topic->isDestroyed())
                 {
                     // The topic is being destroyed: TopicI::disconnect detaches its elements only while the
@@ -912,7 +1053,6 @@ SessionI::destroyImpl(const exception_ptr& ex)
                 {
                     topic->detach(topicId, self);
                 }
-                _topicLock = nullptr;
             }
         }
         _topics.clear();
@@ -953,39 +1093,38 @@ SessionI::getConnection() const
 bool
 SessionI::checkSession()
 {
-    while (true)
+    lock_guard<mutex> lock(_mutex);
+    return checkSessionImpl();
+}
+
+bool
+SessionI::checkSessionImpl()
+{
+    // Called with the session mutex locked.
+    if (!_session)
     {
-        unique_lock<mutex> lock(_mutex);
-        if (_session)
+        return false;
+    }
+
+    if (_connection)
+    {
+        // Make sure the connection is still established. It's possible that the connection got closed and we were not
+        // notified yet by the connection manager. checkSession explicitly checks for the connection to make sure that
+        // if we get a session creation request from a peer (which might detect the connection closure before), it
+        // doesn't get ignored.
+        try
         {
-            if (_connection)
-            {
-                // Make sure the connection is still established. It's possible that the connection got closed and we
-                // were not notified yet by the connection manager. Check session explicitly check for the connection
-                // to make sure that if we get a session creation request from a peer (which might detect the connection
-                // closure before), it doesn't get ignored.
-                try
-                {
-                    _connection->throwException();
-                }
-                catch (const LocalException&)
-                {
-                    auto connection = _connection;
-                    lock.unlock();
-                    if (!disconnected(connection, current_exception()))
-                    {
-                        continue;
-                    }
-                    return false;
-                }
-            }
-            return true;
+            _connection->throwException();
         }
-        else
+        catch (const LocalException&)
         {
+            // Either this call disconnected the session, or another thread already did. Both leave the session
+            // disconnected, which is what the caller needs to know.
+            disconnectedImpl(_connection, current_exception());
             return false;
         }
     }
+    return true;
 }
 
 optional<SessionPrx>
@@ -1010,7 +1149,7 @@ SessionI::setNode(NodePrx node)
 }
 
 void
-SessionI::subscribe(int64_t topicId, TopicI* topic)
+SessionI::subscribe(int64_t topicId, const shared_ptr<TopicI>& topic)
 {
     if (_traceLevels->session > 1)
     {
@@ -1022,7 +1161,7 @@ SessionI::subscribe(int64_t topicId, TopicI* topic)
 }
 
 void
-SessionI::unsubscribe(int64_t topicId, TopicI* topic)
+SessionI::unsubscribe(int64_t topicId, const shared_ptr<TopicI>& topic)
 {
     assert(_topics.find(topicId) != _topics.end());
     auto& subscriber = _topics.at(topicId).getSubscriber(topic);
@@ -1052,7 +1191,7 @@ SessionI::unsubscribe(int64_t topicId, TopicI* topic)
 }
 
 void
-SessionI::disconnect(int64_t topicId, TopicI* topic)
+SessionI::disconnect(int64_t topicId, const shared_ptr<TopicI>& topic)
 {
     lock_guard<mutex> lock(_mutex); // Called by TopicI::destroy
 
@@ -1070,12 +1209,10 @@ SessionI::disconnect(int64_t topicId, TopicI* topic)
     // disconnect() is called from TopicI::destroy() after the topic is marked destroyed, so detach the listeners
     // directly here instead of through runWithTopic, which skips destroyed topics. Skipping the unsubscribe (and the
     // element detachKey/detachFilter it drives) would leave TopicI::_listenerCount stale and trip a debug assert.
-    if (subscriber.getSubscribers().find(topic) != subscriber.getSubscribers().end())
+    if (subscriber.getSubscribers().find(weak_ptr<TopicI>{topic}) != subscriber.getSubscribers().end())
     {
         unique_lock<mutex> topicLock(topic->getMutex());
-        _topicLock = &topicLock;
         unsubscribe(topicId, topic);
-        _topicLock = nullptr;
     }
 
     subscriber.removeSubscriber(topic);
@@ -1144,13 +1281,25 @@ SessionI::unsubscribeFromKey(
         }
     }
 
-    auto& elementSubscribersMap = topicSubscriber.keys[keyId].second;
-    if (--elementSubscribersMap[elementId] == 0)
+    // An unsubscribe always follows the subscribe for the same key id, so the entry is there. The count can be
+    // higher than the number of pending unsubscribes: a disconnect detaches the elements without decrementing,
+    // and the reattach increments again. Look the entry up rather than indexing it: indexing would insert an
+    // entry with a null key for a key id the session never subscribed to, and the sample paths resolve a
+    // sample's key through it.
+    auto k = topicSubscriber.keys.find(keyId);
+    assert(k != topicSubscriber.keys.end());
+    if (k != topicSubscriber.keys.end())
     {
-        elementSubscribersMap.erase(elementId);
-        if (elementSubscribersMap.empty())
+        auto& elementSubscribersMap = k->second.second;
+        auto e = elementSubscribersMap.find(elementId);
+        assert(e != elementSubscribersMap.end() && e->second > 0);
+        if (e != elementSubscribersMap.end() && --e->second == 0)
         {
-            topicSubscriber.keys.erase(keyId);
+            elementSubscribersMap.erase(e);
+            if (elementSubscribersMap.empty())
+            {
+                topicSubscriber.keys.erase(k);
+            }
         }
     }
 }
@@ -1266,17 +1415,22 @@ SessionI::getLastIds(int64_t topicId, int64_t keyOrFilterId, const std::shared_p
         else
         {
             // Key subscription: report this element's lastId for each remote element it's subscribed to under this
-            // key. Key subscriptions are indexed by remote key id, so look the key up directly. An element id can
-            // remain in the key map after its ElementSubscribers was removed (e.g. a multi-key element detaches
-            // under one key but its other keys are still counted), so skip ids with no live subscriber, like the
-            // filter branch above.
-            for (const auto& [elementId, _] : subscriber.keys[keyOrFilterId].second)
+            // key. Key subscriptions are indexed by remote key id, so look the key up directly. This runs for a
+            // key the peer just announced, before anything subscribed to it, so the lookup must not insert: an
+            // entry with a null key would then shadow the unknown-key check the sample paths rely on. An element
+            // id can also outlive its ElementSubscribers, so skip ids with no live subscriber, like the filter
+            // branch above.
+            auto k = subscriber.keys.find(keyOrFilterId);
+            if (k != subscriber.keys.end())
             {
-                if (auto* elementSubscribers = subscriber.get(elementId))
+                for (const auto& [elementId, _] : k->second.second)
                 {
-                    if (auto* s = elementSubscribers->getSubscriber(element))
+                    if (auto* elementSubscribers = subscriber.get(elementId))
                     {
-                        lastIds.emplace(elementId, s->lastId);
+                        if (auto* s = elementSubscribers->getSubscriber(element))
+                        {
+                            lastIds.emplace(elementId, s->lastId);
+                        }
                     }
                 }
             }
@@ -1293,7 +1447,8 @@ SessionI::subscriberInitialized(
     const shared_ptr<Key>& key,
     const std::shared_ptr<DataElementI>& element)
 {
-    // Called with the session locked, from DataElementI::attach.
+    // Called with the session and topic locked, from the initialization closure returned by DataElementI::attach,
+    // which TopicI::attachElementsAck runs once every spec in the ack has attached.
     assert(_topics.find(topicId) != _topics.end());
     TopicSubscriber& subscriber = _topics.at(topicId).getSubscriber(element->getTopic());
     ElementSubscribers* elementSubscribers = subscriber.get(elementId);
@@ -1303,9 +1458,8 @@ SessionI::subscriberInitialized(
     if (_traceLevels->session > 1)
     {
         Trace out(_traceLevels->logger, _traceLevels->sessionCat);
-        out << _id << ": initialized '" << element << "' from 'e" << elementId << '@' << topicId << "'";
+        out << _id << ": initializing '" << element << "' from 'e" << elementId << '@' << topicId << "'";
     }
-    elementSubscriber->initialized = true;
 
     // If the samples collection is empty, the element subscriber's lastId remains unchanged:
     // - If no samples have been received, lastId is 0.
@@ -1317,10 +1471,61 @@ SessionI::subscriberInitialized(
     // - These samples have not yet been processed by the element subscriber, according to the subscriber's lastId.
     if (samples.empty())
     {
+        elementSubscriber->initialized = true;
         return {};
     }
     else
     {
+        vector<shared_ptr<Sample>> samplesI;
+        samplesI.reserve(samples.size());
+        auto sampleFactory = element->getTopic()->getSampleFactory();
+        auto keyFactory = element->getTopic()->getKeyFactory();
+        for (const auto& sample : samples)
+        {
+            // An any-key writer marshals the key inline (keyId 0), as the live data path in s() handles; accept an
+            // inline-key sample for a key subscription too, rather than requiring keyId to map to the subscription
+            // key.
+            assert(sample.keyId == 0 || key == subscriber.findKey(sample.keyId));
+
+            shared_ptr<Key> sampleKey = key;
+            if (!sampleKey)
+            {
+                try
+                {
+                    sampleKey = keyFactory->decode(_instance->getCommunicator(), sample.keyValue);
+                }
+                catch (const std::exception& ex)
+                {
+                    // The key factory runs the application's decoder. Abandon these samples and keep the subscriber's
+                    // previous state, so the peer still offers them on the next initialization. Returning instead of
+                    // letting the exception escape confines the failure to this element: the other elements in the
+                    // ack are still attached and initialized. The session protocol is fire-and-forget, so a local
+                    // warning is the only way to report the failure.
+                    Warning out(_traceLevels->logger);
+                    out << "discarded the initialization samples for '" << element
+                        << "': the key could not be decoded:\n"
+                        << ex.what();
+                    return {};
+                }
+            }
+
+            samplesI.push_back(sampleFactory->create(
+                _id,
+                elementSubscribers->name,
+                sample.id,
+                sample.event,
+                sampleKey,
+                subscriber.findTag(sample.tag),
+                sample.value,
+                sample.timestamp));
+            assert(samplesI.back()->key);
+        }
+
+        // Mark the subscriber initialized and advance its lastId only after its samples are decoded and built, like
+        // initSamples does: if a key decoder throws above, the subscriber keeps its previous state, so the peer still
+        // offers these samples on the next initialization instead of filtering them out as already received.
+        elementSubscriber->initialized = true;
+
         // A multi-key subscriber shares a single ElementSubscriber across its keys, and the peer acks one batch per
         // key, so this runs once per key with sample ids interleaved across keys — a later batch need not strictly
         // follow the previous one. Advance lastId monotonically to the newest id seen (samples are ordered by id).
@@ -1329,28 +1534,6 @@ SessionI::subscriberInitialized(
             elementSubscriber->lastId = samples.back().id;
         }
 
-        vector<shared_ptr<Sample>> samplesI;
-        samplesI.reserve(samples.size());
-        auto sampleFactory = element->getTopic()->getSampleFactory();
-        auto keyFactory = element->getTopic()->getKeyFactory();
-        for (const auto& sample : samples)
-        {
-            // An any-key writer marshals the key inline (keyId 0, keyValue set), as the live data path in s()
-            // handles; accept an inline-key sample for a key subscription too, rather than requiring keyId to map
-            // to the subscription key.
-            assert(!sample.keyValue.empty() || key == subscriber.keys[sample.keyId].first);
-
-            samplesI.push_back(sampleFactory->create(
-                _id,
-                elementSubscribers->name,
-                sample.id,
-                sample.event,
-                key ? key : keyFactory->decode(_instance->getCommunicator(), sample.keyValue),
-                subscriber.tags[sample.tag],
-                sample.value,
-                sample.timestamp));
-            assert(samplesI.back()->key);
-        }
         return samplesI;
     }
 }
@@ -1370,39 +1553,96 @@ SessionI::runWithTopics(
         {
             continue;
         }
-        _topicLock = &lock;
         callback(topic);
-        _topicLock = nullptr;
     }
 }
 
 void
-SessionI::runWithTopics(int64_t topicId, const function<void(TopicI*, TopicSubscriber&)>& callback)
+SessionI::runWithTopics(int64_t topicId, const function<void(const shared_ptr<TopicI>&, TopicSubscriber&)>& callback)
 {
     auto t = _topics.find(topicId);
     if (t != _topics.end())
     {
-        for (auto& [topic, subscriber] : t->second.getSubscribers())
+        auto& subscribers = t->second.getSubscribers();
+        auto p = subscribers.begin();
+        while (p != subscribers.end())
         {
-            unique_lock<mutex> lock(topic->getMutex());
-            if (topic->isDestroyed())
+            // lock() can return the last owning reference, so the topic can be destroyed at the end of
+            // this iteration, while the session mutex is held.
+            auto topic = p->first.lock();
+            if (!topic)
             {
+                p = subscribers.erase(p);
                 continue;
             }
-            _topicLock = &lock;
-            callback(topic, subscriber);
-            _topicLock = nullptr;
+
+            unique_lock<mutex> lock(topic->getMutex());
+            if (!topic->isDestroyed())
+            {
+                callback(topic, p->second);
+            }
+            ++p;
         }
     }
 }
 
 void
-SessionI::runWithTopic(int64_t topicId, TopicI* topic, const function<void(TopicSubscriber&)>& callback)
+SessionI::runWithTopics(
+    int64_t topicId,
+    int64_t peerTopicId,
+    const function<void(const shared_ptr<TopicI>&, TopicSubscriber&)>& callback)
 {
     auto t = _topics.find(topicId);
     if (t != _topics.end())
     {
-        auto p = t->second.getSubscribers().find(topic);
+        auto& subscribers = t->second.getSubscribers();
+        auto p = subscribers.begin();
+        while (p != subscribers.end())
+        {
+            // lock() can return the last owning reference, so the topic can be destroyed at the end of
+            // this iteration, while the session mutex is held.
+            auto topic = p->first.lock();
+            if (!topic)
+            {
+                p = subscribers.erase(p);
+                continue;
+            }
+
+            if (topic->getId() != peerTopicId)
+            {
+                ++p;
+                continue;
+            }
+            unique_lock<mutex> lock(topic->getMutex());
+            if (!topic->isDestroyed())
+            {
+                callback(topic, p->second);
+            }
+            return;
+        }
+    }
+
+    // No local topic addressed by peerTopicId is subscribed to the remote topic: it was never attached, or was
+    // destroyed and reaped during the handshake. Dropping the request is correct, but trace it so it is not
+    // mistaken for a lost message.
+    if (_traceLevels->session > 2)
+    {
+        Trace out(_traceLevels->logger, _traceLevels->sessionCat);
+        out << _id << ": no local topic '" << peerTopicId << "' subscribed to remote topic '" << topicId
+            << "', ignoring the request";
+    }
+}
+
+void
+SessionI::runWithTopic(
+    int64_t topicId,
+    const shared_ptr<TopicI>& topic,
+    const function<void(TopicSubscriber&)>& callback)
+{
+    auto t = _topics.find(topicId);
+    if (t != _topics.end())
+    {
+        auto p = t->second.getSubscribers().find(weak_ptr<TopicI>{topic});
         if (p != t->second.getSubscribers().end())
         {
             unique_lock<mutex> lock(topic->getMutex());
@@ -1410,9 +1650,30 @@ SessionI::runWithTopic(int64_t topicId, TopicI* topic, const function<void(Topic
             {
                 return;
             }
-            _topicLock = &lock;
             callback(p->second);
-            _topicLock = nullptr;
+        }
+    }
+}
+
+void
+SessionI::decodeTags(
+    const shared_ptr<TopicI>& topic,
+    const ElementInfoSeq& tags,
+    map<int64_t, shared_ptr<Tag>>& decoded)
+{
+    for (const auto& tag : tags)
+    {
+        try
+        {
+            decoded[tag.id] = topic->getTagFactory()->decode(_instance->getCommunicator(), tag.value);
+        }
+        catch (const std::exception& ex)
+        {
+            // The tag factory runs the application's decoder. Skip a tag it can't decode rather than let it abandon
+            // the tags around it and the attach that carried them. The peer resends its tags on reconnect.
+            Warning out(_traceLevels->logger);
+            out << "skipped update tag " << tag.id << " on topic '" << topic << "': the tag could not be decoded:\n"
+                << ex.what();
         }
     }
 }
@@ -1459,7 +1720,7 @@ SubscriberSessionI::s(int64_t topicId, int64_t elementId, DataSample dataSample,
     auto now = chrono::system_clock::now();
     runWithTopics(
         topicId,
-        [&](TopicI* topic, TopicSubscriber& topicSubscriber)
+        [&](const shared_ptr<TopicI>& topic, TopicSubscriber& topicSubscriber)
         {
             auto elementSubscribers = topicSubscriber.get(elementId);
             if (elementSubscribers && !elementSubscribers->getSubscribers().empty())
@@ -1491,11 +1752,14 @@ SubscriberSessionI::s(int64_t topicId, int64_t elementId, DataSample dataSample,
                     out << "]";
                 }
 
+                // A key id of 0 means the key is marshaled inline in keyValue, per DataSample. Don't infer that
+                // from an empty keyValue: a custom key encoder can legitimately encode a key to zero bytes, and
+                // key ids start at 1.
                 shared_ptr<Key> key;
-                if (dataSample.keyValue.empty())
+                if (dataSample.keyId != 0)
                 {
-                    auto q = topicSubscriber.keys.find(dataSample.keyId);
-                    if (q == topicSubscriber.keys.end())
+                    key = topicSubscriber.findKey(dataSample.keyId);
+                    if (!key)
                     {
                         // The session never subscribed to this key (a peer can forward a sample for a key none of
                         // this session's readers are subscribed to); no subscriber can match it.
@@ -1507,37 +1771,66 @@ SubscriberSessionI::s(int64_t topicId, int64_t elementId, DataSample dataSample,
                         }
                         return;
                     }
-                    key = q->second.first;
                 }
                 else
                 {
-                    key = topic->getKeyFactory()->decode(_instance->getCommunicator(), dataSample.keyValue);
+                    try
+                    {
+                        key = topic->getKeyFactory()->decode(_instance->getCommunicator(), dataSample.keyValue);
+                    }
+                    catch (const std::exception& ex)
+                    {
+                        // The key factory runs the application's decoder. Discard the sample rather than let the
+                        // exception escape: an escape would discard it for every reader attached to this writer
+                        // element and skip the other local topics subscribed to this remote topic.
+                        Warning out(_traceLevels->logger);
+                        out << _id << ": discarding sample '" << dataSample.id << "' from 'e" << elementId << '@'
+                            << topicId << "': the key could not be decoded:\n"
+                            << ex.what();
+                        return;
+                    }
                 }
                 assert(key);
 
-                auto sample = topic->getSampleFactory()->create(
-                    _id,
-                    elementSubscribers->name,
-                    dataSample.id,
-                    dataSample.event,
-                    key,
-                    topicSubscriber.tags[dataSample.tag],
-                    dataSample.value,
-                    dataSample.timestamp);
+                auto createSample = [&]
+                {
+                    return topic->getSampleFactory()->create(
+                        _id,
+                        elementSubscribers->name,
+                        dataSample.id,
+                        dataSample.event,
+                        key,
+                        topicSubscriber.findTag(dataSample.tag),
+                        dataSample.value,
+                        dataSample.timestamp);
+                };
+
+                // A full value is decoded into the sample the same way whatever element receives it, so the elements
+                // subscribed to this writer element share a single sample, decoded once. A partial update is not: each
+                // element resolves it against its own current value for the key and the resolved value is written into
+                // the sample, so each element gets a sample of its own.
+                shared_ptr<Sample> sharedSample;
+                if (dataSample.event != DataStorm::SampleEvent::PartialUpdate)
+                {
+                    sharedSample = createSample();
+                }
 
                 for (auto& [element, elementSubscriber] : elementSubscribers->getSubscribers())
                 {
                     if (elementSubscriber.initialized &&
                         (dataSample.keyId <= 0 || elementSubscriber.keys.find(key) != elementSubscriber.keys.end()))
                     {
+                        auto elementSample = sharedSample ? sharedSample : createSample();
                         elementSubscriber.lastId = dataSample.id;
+                        // An inline key (keyId 0) was not matched against this element's subscription, so the
+                        // element has to check it itself.
                         element->queue(
-                            sample,
+                            elementSample,
                             elementSubscribers->priority,
                             shared_from_this(),
                             current.facet,
                             now,
-                            !dataSample.keyValue.empty());
+                            dataSample.keyId == 0);
                     }
                 }
             }
@@ -1552,7 +1845,18 @@ SubscriberSessionI::reconnect(NodePrx node)
         Trace out(_traceLevels->logger, _traceLevels->sessionCat);
         out << _id << ": trying to reconnect session with '" << node->ice_toString() << "'";
     }
-    _parent->createPublisherSession(node, nullptr, static_pointer_cast<SubscriberSessionI>(shared_from_this()));
+
+    try
+    {
+        _parent->createPublisherSession(node, nullptr, static_pointer_cast<SubscriberSessionI>(shared_from_this()));
+    }
+    catch (const SessionCreationException&)
+    {
+        // createPublisherSession throws for the benefit of its servant caller, which maps the exception to the
+        // initiateCreateSession reply. Here the caller is the session retry task, which has nothing to reply to: the
+        // failure was either already accounted for by retrySubscriberSessionCreation, or it reports that the node is
+        // shutting down, in which case there is nothing to retry.
+    }
 }
 
 void

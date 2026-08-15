@@ -175,6 +175,24 @@ namespace DataStormI
                 }
             }
 
+            /// Returns the local key matching a remote key id, or `nullptr` when this session holds no subscription
+            /// for that id. Samples from a keyed writer carry only the key id, and the sample paths resolve it
+            /// through this method. It never inserts: an entry with a null key would be indistinguishable from a
+            /// real subscription and would defeat the callers' unknown-key checks.
+            [[nodiscard]] std::shared_ptr<Key> findKey(std::int64_t keyId) const
+            {
+                auto p = keys.find(keyId);
+                return p == keys.end() ? nullptr : p->second.first;
+            }
+
+            /// Returns the local update tag matching a remote tag id, or `nullptr` when this session holds no tag for
+            /// that id. Misses are routine, since a sample without an update tag carries the tag id 0.
+            [[nodiscard]] std::shared_ptr<Tag> findTag(std::int64_t tagId) const
+            {
+                auto p = tags.find(tagId);
+                return p == tags.end() ? nullptr : p->second;
+            }
+
             // A map of remote keys to local keys and the number of local elements subscribing to a remote element.
             // - Key: The remote key ID.
             // - Value: A pair containing the local key and a map of remote element IDs to the number of local elements
@@ -196,54 +214,52 @@ namespace DataStormI
         class TopicSubscribers
         {
         public:
-            // Add the give topic as a subscriber, if a subscription already exists, update the session instance id.
-            void addSubscriber(TopicI* topic, int sessionInstanceId)
+            using SubscriberMap = std::map<std::weak_ptr<TopicI>, TopicSubscriber, std::owner_less<>>;
+
+            // Add the given topic as a subscriber, if a subscription already exists, update the session instance id.
+            void addSubscriber(const std::shared_ptr<TopicI>& topic, int sessionInstanceId)
             {
                 _sessionInstanceId = sessionInstanceId;
-                auto p = _subscribers.find(topic);
+                auto p = _subscribers.find(std::weak_ptr<TopicI>{topic});
                 if (p != _subscribers.end())
                 {
                     p->second.sessionInstanceId = sessionInstanceId;
                 }
                 else
                 {
-                    _subscribers.emplace(topic, TopicSubscriber(sessionInstanceId));
+                    _subscribers.emplace(std::weak_ptr<TopicI>{topic}, TopicSubscriber(sessionInstanceId));
                 }
             }
 
-            [[nodiscard]] TopicSubscriber& getSubscriber(TopicI* topic)
+            [[nodiscard]] TopicSubscriber& getSubscriber(const std::shared_ptr<TopicI>& topic)
             {
-                assert(_subscribers.find(topic) != _subscribers.end());
-                return _subscribers.at(topic);
+                return _subscribers.at(std::weak_ptr<TopicI>{topic});
             }
 
-            void removeSubscriber(TopicI* topic) { _subscribers.erase(topic); }
-
-            std::map<TopicI*, TopicSubscriber>& getSubscribers() { return _subscribers; }
-
-            // Determine if the subscriber should be reaped. The detach callback is called for each removed
-            // subscriber, before it is removed.
-            [[nodiscard]] bool reap(int sessionInstanceId, const std::function<void(TopicI*, TopicSubscriber&)>& detach)
+            void removeSubscriber(const std::shared_ptr<TopicI>& topic)
             {
-                if (sessionInstanceId != _sessionInstanceId)
-                {
-                    // If using a prior session instance id, we can remove all subscribers.
-                    for (auto& [topic, subscriber] : _subscribers)
-                    {
-                        detach(topic, subscriber);
-                    }
-                    _subscribers.clear();
-                    return true;
-                }
+                _subscribers.erase(std::weak_ptr<TopicI>{topic});
+            }
 
+            SubscriberMap& getSubscribers() { return _subscribers; }
+
+            // Reap subscribers from prior session instances and subscribers whose topics no longer exist. The detach
+            // callback is called for each live subscriber before it is removed.
+            [[nodiscard]] bool
+            reap(int sessionInstanceId, const std::function<void(const std::shared_ptr<TopicI>&)>& detach)
+            {
                 auto p = _subscribers.begin();
                 while (p != _subscribers.end())
                 {
-                    if (p->second.sessionInstanceId != sessionInstanceId)
+                    auto topic = p->first.lock();
+                    if (!topic || sessionInstanceId != _sessionInstanceId ||
+                        p->second.sessionInstanceId != sessionInstanceId)
                     {
-                        // Remove the subscriber if it is using a prior session instance id.
-                        detach(p->first, p->second);
-                        _subscribers.erase(p++);
+                        if (topic)
+                        {
+                            detach(topic);
+                        }
+                        p = _subscribers.erase(p);
                     }
                     else
                     {
@@ -257,13 +273,14 @@ namespace DataStormI
 
         private:
             // Each entry in the map represents a subscriber to the same remote topic.
-            // The key is a pointer to the local topic object subscribing to the remote topic, and the TopicSubscriber
-            // object contains the subscription details.
-            std::map<TopicI*, TopicSubscriber> _subscribers;
+            // The key is the non-owning identity of the local topic object subscribing to the remote topic, and the
+            // TopicSubscriber object contains the subscription details. A weak key avoids retaining the topic through
+            // the Topic -> Session listener relationship and remains unambiguous if a later topic reuses its address.
+            SubscriberMap _subscribers;
 
             // The session instance id is incremented each time a session is reconnected. Subscribers with a different
             // session instance id can be discarded.
-            int _sessionInstanceId;
+            int _sessionInstanceId{0};
         };
 
     public:
@@ -282,17 +299,18 @@ namespace DataStormI
         void detachTags(std::int64_t, Ice::LongSeq, const Ice::Current&) final;
 
         void announceElements(std::int64_t, DataStormContract::ElementInfoSeq, const Ice::Current&) final;
-        void attachElements(std::int64_t, DataStormContract::ElementSpecSeq, bool, const Ice::Current&) final;
-        void attachElementsAck(std::int64_t, DataStormContract::ElementSpecAckSeq, const Ice::Current&) final;
+        void
+        attachElements(std::int64_t, std::int64_t, DataStormContract::ElementSpecSeq, bool, const Ice::Current&) final;
+        void
+        attachElementsAck(std::int64_t, std::int64_t, DataStormContract::ElementSpecAckSeq, const Ice::Current&) final;
         void detachElements(std::int64_t, Ice::LongSeq, const Ice::Current&) final;
 
-        void initSamples(std::int64_t, DataStormContract::DataSamplesSeq, const Ice::Current&) final;
+        void initSamples(std::int64_t, std::int64_t, DataStormContract::DataSamplesSeq, const Ice::Current&) final;
 
         void disconnected(const Ice::Current&) final;
 
         void
         connected(DataStormContract::SessionPrx, const Ice::ConnectionPtr&, const DataStormContract::TopicInfoSeq&);
-        [[nodiscard]] bool disconnected(const Ice::ConnectionPtr&, std::exception_ptr);
 
         /// Handles a disconnect notification (the peer's disconnected() request or the connection closure) and,
         /// when the session was connected, schedules the reconnection retry. Handling both under a single lock
@@ -302,11 +320,11 @@ namespace DataStormI
         /// session.
         [[nodiscard]] bool handleDisconnected(const Ice::ConnectionPtr&, std::exception_ptr);
 
-        [[nodiscard]] bool retry(DataStormContract::NodePrx, std::exception_ptr);
         void destroyImpl(const std::exception_ptr&);
 
-        // The implementations of disconnected and retry; called with the session mutex locked.
-        [[nodiscard]] bool disconnectedImpl(const Ice::ConnectionPtr&, std::exception_ptr);
+        // The implementations of checkSession, disconnected and retry; called with the session mutex locked.
+        [[nodiscard]] bool checkSessionImpl();
+        bool disconnectedImpl(const Ice::ConnectionPtr&, std::exception_ptr);
         [[nodiscard]] bool retryImpl(DataStormContract::NodePrx, std::exception_ptr);
 
         // Cancels and clears any pending retry task, breaking the _retryTask -> task -> lambda -> self reference
@@ -320,14 +338,33 @@ namespace DataStormI
         [[nodiscard]] std::optional<DataStormContract::SessionPrx> getSession() const;
         [[nodiscard]] bool checkSession();
 
+        /// Returns the identifier of the session creation attempt in progress. Callers starting an attempt pass
+        /// the value they read here to #sessionCreationFailed.
+        [[nodiscard]] std::int64_t connectAttempt() const;
+
+        /// Handles the failure of a session creation attempt: classifies it and decides whether to ignore it, retry,
+        /// or give up, as a single step under the session mutex. It cannot be split into separate queries because
+        /// inspecting the session state can itself disconnect the session.
+        /// @param node The peer node to reconnect to.
+        /// @param exception The failure reported by the attempt.
+        /// @param connectAttempt The value #connectAttempt returned when the attempt was started. A reply from an
+        /// attempt that has since been superseded is ignored, so it cannot consume the current attempt's retry
+        /// budget; without this a burst of late replies destroys a session that is reconnecting normally.
+        /// @return `false` when the retry limit was reached or no retry is possible: the caller must remove the
+        /// session.
+        [[nodiscard]] bool sessionCreationFailed(
+            DataStormContract::NodePrx node,
+            std::exception_ptr exception,
+            std::int64_t connectAttempt);
+
         [[nodiscard]] DataStormContract::SessionPrx getProxy() const { return _proxy; }
 
         [[nodiscard]] DataStormContract::NodePrx getNode() const;
         void setNode(DataStormContract::NodePrx);
 
-        void subscribe(std::int64_t, TopicI*);
-        void unsubscribe(std::int64_t, TopicI*);
-        void disconnect(std::int64_t, TopicI*);
+        void subscribe(std::int64_t, const std::shared_ptr<TopicI>&);
+        void unsubscribe(std::int64_t, const std::shared_ptr<TopicI>&);
+        void disconnect(std::int64_t, const std::shared_ptr<TopicI>&);
 
         void subscribeToKey(
             std::int64_t topicId,
@@ -364,6 +401,9 @@ namespace DataStormI
         [[nodiscard]] DataStormContract::LongLongDict
         getLastIds(std::int64_t topic, std::int64_t keyOrFilterId, const std::shared_ptr<DataElementI>& element);
 
+        /// Marks the subscriber initialized and advances its lastId past the acked samples.
+        ///
+        /// @return The samples the subscriber should be initialized with.
         [[nodiscard]] std::vector<std::shared_ptr<Sample>> subscriberInitialized(
             std::int64_t,
             std::int64_t,
@@ -396,7 +436,23 @@ namespace DataStormI
         ///
         /// @param topicId The ID of the topic to process.
         /// @param callback The callback function to execute for each subscriber.
-        void runWithTopics(std::int64_t topicId, const std::function<void(TopicI*, TopicSubscriber&)>& callback);
+        void runWithTopics(
+            std::int64_t topicId,
+            const std::function<void(const std::shared_ptr<TopicI>&, TopicSubscriber&)>& callback);
+
+        /// Runs the provided callback for the single local topic subscribing to the remote topic `topicId` whose own
+        /// id is `peerTopicId`. Routes a request to exactly the addressed topic instance instead of fanning it
+        /// over every same-name topic (the fan-out that lets same-name topics collide on echoed element and key ids).
+        /// The callback is executed with the topic's mutex locked; it runs at most once, and not at all if no such
+        /// topic is currently subscribed.
+        ///
+        /// @param topicId The remote (sender's) topic id the local topics are subscribed to.
+        /// @param peerTopicId The local topic instance the request is addressed to.
+        /// @param callback The callback function to execute for the subscriber.
+        void runWithTopics(
+            std::int64_t topicId,
+            std::int64_t peerTopicId,
+            const std::function<void(const std::shared_ptr<TopicI>&, TopicSubscriber&)>& callback);
 
         /// Runs the provided callback function for the specified topic, if it is among the subscribers for the given
         /// topic ID.
@@ -405,7 +461,23 @@ namespace DataStormI
         /// @param topicId The ID of the topic to process.
         /// @param topic The topic to process.
         /// @param callback The callback function to execute for the subscriber.
-        void runWithTopic(std::int64_t topicId, TopicI* topic, const std::function<void(TopicSubscriber&)>& callback);
+        void runWithTopic(
+            std::int64_t topicId,
+            const std::shared_ptr<TopicI>& topic,
+            const std::function<void(TopicSubscriber&)>& callback);
+
+        /// Decodes the update tags the peer sent for a topic and adds them to the given tag map.
+        ///
+        /// The tag factory runs the application's decoder, so a tag it rejects is skipped with a warning instead of
+        /// abandoning the tags around it and the attach that carried them. The peer resends its tags on reconnect.
+        ///
+        /// @param topic The topic the tags belong to.
+        /// @param tags The encoded tags received from the peer.
+        /// @param decoded The tag map the decoded tags are added to.
+        void decodeTags(
+            const std::shared_ptr<TopicI>& topic,
+            const DataStormContract::ElementInfoSeq& tags,
+            std::map<std::int64_t, std::shared_ptr<Tag>>& decoded);
 
         /// Returns the topics that match the specified name.
         ///
@@ -444,6 +516,13 @@ namespace DataStormI
         // The number of attempts made to reconnect the session.
         int _retryCount{0};
 
+        // Identifies the current session creation attempt. It is incremented when the session connects and when a
+        // failure is accounted for, which are the two points that make an attempt still in flight irrelevant. It is
+        // deliberately NOT incremented on a bare disconnect: disconnecting does not by itself schedule a retry, so
+        // invalidating the in-flight attempt there would discard the failure that would have scheduled one, leaving
+        // the session with no attempt, no retry task, and no removal.
+        std::int64_t _connectAttempt{0};
+
         // A retry task, scheduled if an attempt to reconnect the session is underway; nullptr if no retry is scheduled.
         IceInternal::TimerTaskPtr _retryTask;
 
@@ -451,9 +530,6 @@ namespace DataStormI
         // - Key: The topic ID on the remote node.
         // - Value: A `TopicSubscribers` object containing the subscribers for the remote topic.
         std::map<std::int64_t, TopicSubscribers> _topics;
-
-        // The lock of the topic being processed by the callback function. See runWithTopics.
-        std::unique_lock<std::mutex>* _topicLock;
 
         // The proxy to the peer session, or `std::nullopt` if the session is disconnected.
         std::optional<DataStormContract::SessionPrx> _session;

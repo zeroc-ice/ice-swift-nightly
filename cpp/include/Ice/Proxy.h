@@ -14,10 +14,13 @@
 #include "RequestHandlerF.h"
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <iosfwd>
+#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 
@@ -144,7 +147,8 @@ namespace Ice
         }
 
         /// Creates a proxy that is identical to this proxy, except for the invocation timeout.
-        /// @param timeout The new invocation timeout (in milliseconds).
+        /// @param timeout The new invocation timeout (in milliseconds). Zero or any negative value means infinite
+        /// and is normalized to -1.
         /// @return A proxy with the new timeout.
         [[nodiscard]] Prx ice_invocationTimeout(int timeout) const
         {
@@ -152,13 +156,27 @@ namespace Ice
         }
 
         /// Creates a proxy that is identical to this proxy, except for the invocation timeout.
-        /// @param timeout The new invocation timeout.
+        /// @param timeout The new invocation timeout. Zero or any negative duration means infinite and is
+        /// normalized to -1 millisecond; a duration that is not a whole number of milliseconds is rounded up to the
+        /// next whole number of milliseconds.
         /// @return A proxy with the new timeout.
+        /// @throws std::invalid_argument Thrown when @p timeout is greater than
+        /// `std::numeric_limits<std::int32_t>::max()` milliseconds.
         template<class Rep, class Period>
         [[nodiscard]] Prx ice_invocationTimeout(const std::chrono::duration<Rep, Period>& timeout) const
         {
-            return fromReference(
-                asPrx()._invocationTimeout(std::chrono::duration_cast<std::chrono::milliseconds>(timeout)));
+            if (timeout <= std::chrono::duration<Rep, Period>::zero())
+            {
+                return fromReference(asPrx()._invocationTimeout(std::chrono::milliseconds(-1)));
+            }
+            // Compare in a double-based representation that cannot overflow. The limit is a whole number of
+            // milliseconds, so a timeout that passes this check still fits after rounding up.
+            // The extra parentheses prevent the expansion of the max macro from Windows headers.
+            if (timeout > std::chrono::duration<double, std::milli>{(std::numeric_limits<std::int32_t>::max)()})
+            {
+                throw std::invalid_argument("the invocation timeout cannot be greater than 2147483647 milliseconds");
+            }
+            return fromReference(asPrx()._invocationTimeout(std::chrono::ceil<std::chrono::milliseconds>(timeout)));
         }
 
         /// Creates a proxy that is identical to this proxy, except for the locator.
@@ -170,7 +188,8 @@ namespace Ice
         }
 
         /// Creates a proxy that is identical to this proxy, except for the locator cache timeout.
-        /// @param timeout The new locator cache timeout (in seconds).
+        /// @param timeout The new locator cache timeout (in seconds). Any negative value means infinite and is
+        /// normalized to -1.
         /// @return A proxy with the new timeout.
         [[nodiscard]] Prx ice_locatorCacheTimeout(int timeout) const
         {
@@ -178,13 +197,27 @@ namespace Ice
         }
 
         /// Creates a proxy that is identical to this proxy, except for the locator cache timeout.
-        /// @param timeout The new locator cache timeout.
+        /// @param timeout The new locator cache timeout. Any negative duration means infinite and is normalized to
+        /// -1 second; a duration that is not a whole number of seconds is rounded up to the next whole number of
+        /// seconds.
         /// @return A proxy with the new timeout.
+        /// @throws std::invalid_argument Thrown when @p timeout is greater than
+        /// `std::numeric_limits<std::int32_t>::max()` seconds.
         template<class Rep, class Period>
         [[nodiscard]] Prx ice_locatorCacheTimeout(const std::chrono::duration<Rep, Period>& timeout) const
         {
-            return fromReference(
-                asPrx()._locatorCacheTimeout(std::chrono::duration_cast<std::chrono::seconds>(timeout)));
+            if (timeout < std::chrono::duration<Rep, Period>::zero())
+            {
+                return fromReference(asPrx()._locatorCacheTimeout(std::chrono::seconds(-1)));
+            }
+            // Compare in a double-based representation that cannot overflow. The limit is a whole number of
+            // seconds, so a timeout that passes this check still fits after rounding up.
+            // The extra parentheses prevent the expansion of the max macro from Windows headers.
+            if (timeout > std::chrono::duration<double>{(std::numeric_limits<std::int32_t>::max)()})
+            {
+                throw std::invalid_argument("the locator cache timeout cannot be greater than 2147483647 seconds");
+            }
+            return fromReference(asPrx()._locatorCacheTimeout(std::chrono::ceil<std::chrono::seconds>(timeout)));
         }
 
         /// Creates a proxy that is identical to this proxy, but uses oneway invocations.
@@ -416,10 +449,14 @@ namespace Ice
         /// Invokes an operation.
         /// @param operation The name of the operation to invoke.
         /// @param mode The operation mode (normal or idempotent).
-        /// @param inParams An encapsulation containing the encoded in-parameters for the operation.
+        /// @param inParams An encapsulation containing the encoded in-parameters for the operation. You can pass an
+        /// empty byte sequence when the operation takes no in-parameters; the Ice runtime then marshals an empty
+        /// encapsulation.
         /// @param outParams An encapsulation containing the encoded result.
         /// @param context The request context.
         /// @return `true` if the operation completed successfully, `false` if it completed with a user exception.
+        /// @remark When this proxy is a oneway, datagram, or batch proxy, this function returns `true` and an empty
+        /// @p outParams as soon as the request is accepted by the transport or added to the batch.
         bool ice_invoke(
             std::string_view operation,
             Ice::OperationMode mode,
@@ -430,12 +467,16 @@ namespace Ice
         /// Invokes an operation asynchronously.
         /// @param operation The name of the operation to invoke.
         /// @param mode The operation mode (normal or idempotent).
-        /// @param inParams An encapsulation containing the encoded in-parameters for the operation.
+        /// @param inParams An encapsulation containing the encoded in-parameters for the operation. You can pass an
+        /// empty byte sequence when the operation takes no in-parameters; the Ice runtime then marshals an empty
+        /// encapsulation.
         /// @param context The request context.
         /// @return A future that becomes available when the invocation completes. This future holds:
         /// - `returnValue` `true` if the operation completed successfully, `false` if it completed with a user
         ///    exception.
         /// - `outParams` An encapsulation containing the encoded result.
+        /// @remark When this proxy is a oneway, datagram, or batch proxy, the future completes with `returnValue`
+        /// `true` and an empty `outParams` as soon as the request is accepted by the transport or added to the batch.
         [[nodiscard]] std::future<std::tuple<bool, std::vector<std::byte>>> ice_invokeAsync(
             std::string_view operation,
             Ice::OperationMode mode,
@@ -445,7 +486,9 @@ namespace Ice
         /// Invokes an operation asynchronously.
         /// @param operation The name of the operation to invoke.
         /// @param mode The operation mode (normal or idempotent).
-        /// @param inParams An encapsulation containing the encoded in-parameters for the operation.
+        /// @param inParams An encapsulation containing the encoded in-parameters for the operation. You can pass an
+        /// empty byte sequence when the operation takes no in-parameters; the Ice runtime then marshals an empty
+        /// encapsulation.
         /// @param response The response callback. The Ice runtime calls this function from an Ice thread pool thread.
         /// If you set InitializationData::executor, the executor determines the thread that executes this function.
         /// It accepts:
@@ -479,10 +522,14 @@ namespace Ice
         /// Invokes an operation.
         /// @param operation The name of the operation to invoke.
         /// @param mode The operation mode (normal or idempotent).
-        /// @param inParams An encapsulation containing the encoded in-parameters for the operation.
+        /// @param inParams An encapsulation containing the encoded in-parameters for the operation. You can pass an
+        /// empty byte sequence when the operation takes no in-parameters; the Ice runtime then marshals an empty
+        /// encapsulation.
         /// @param outParams An encapsulation containing the encoded result.
         /// @param context The request context.
         /// @return `true` if the operation completed successfully, `false` if it completed with a user exception.
+        /// @remark When this proxy is a oneway, datagram, or batch proxy, this function returns `true` and an empty
+        /// @p outParams as soon as the request is accepted by the transport or added to the batch.
         bool ice_invoke(
             std::string_view operation,
             Ice::OperationMode mode,
@@ -493,12 +540,16 @@ namespace Ice
         /// Invokes an operation asynchronously.
         /// @param operation The name of the operation to invoke.
         /// @param mode The operation mode (normal or idempotent).
-        /// @param inParams An encapsulation containing the encoded in-parameters for the operation.
+        /// @param inParams An encapsulation containing the encoded in-parameters for the operation. You can pass an
+        /// empty byte sequence when the operation takes no in-parameters; the Ice runtime then marshals an empty
+        /// encapsulation.
         /// @param context The request context.
         /// @return A future that becomes available when the invocation completes. This future holds:
         /// - `returnValue` `true` if the operation completed successfully, `false` if it completed with a user
         ///    exception.
         /// - `outParams` An encapsulation containing the encoded result.
+        /// @remark When this proxy is a oneway, datagram, or batch proxy, the future completes with `returnValue`
+        /// `true` and an empty `outParams` as soon as the request is accepted by the transport or added to the batch.
         [[nodiscard]] std::future<std::tuple<bool, std::vector<std::byte>>> ice_invokeAsync(
             std::string_view operation,
             Ice::OperationMode mode,
@@ -508,7 +559,9 @@ namespace Ice
         /// Invokes an operation asynchronously.
         /// @param operation The name of the operation to invoke.
         /// @param mode The operation mode (normal or idempotent).
-        /// @param inParams An encapsulation containing the encoded in-parameters for the operation.
+        /// @param inParams An encapsulation containing the encoded in-parameters for the operation. You can pass an
+        /// empty byte sequence when the operation takes no in-parameters; the Ice runtime then marshals an empty
+        /// encapsulation.
         /// @param response The response callback. The Ice runtime calls this function from an Ice thread pool thread.
         /// If you set InitializationData::executor, the executor determines the thread that executes this function.
         /// It accepts:
@@ -539,15 +592,20 @@ namespace Ice
             std::function<void(bool)> sent = nullptr,
             const Ice::Context& context = Ice::noExplicitContext) const;
 
-        /// Gets the connection for this proxy. If the proxy does not yet have an established connection,
-        /// it first attempts to create a connection.
+        /// Gets the connection for this proxy. If the proxy does not yet have an established connection or its
+        /// connection is closed or being closed, it first attempts to create a new connection. For a fixed proxy,
+        /// this function returns the connection this proxy is bound to, even when this connection is closed.
         /// @return The connection for this proxy.
         /// @remark You can call this function to establish a connection or associate the proxy with an existing
         /// connection and ignore the return value.
+        /// @remark When this proxy reaches its target object through collocation optimization (see
+        /// #ice_collocationOptimized), this function returns a null connection: collocated invocations don't use a
+        /// connection.
         Ice::ConnectionPtr ice_getConnection() const; // NOLINT(modernize-use-nodiscard)
 
-        /// Gets the connection for this proxy. If the proxy does not yet have an established connection,
-        /// it first attempts to create a connection.
+        /// Gets the connection for this proxy. If the proxy does not yet have an established connection or its
+        /// connection is closed or being closed, it first attempts to create a new connection. For a fixed proxy,
+        /// this function returns the connection this proxy is bound to, even when this connection is closed.
         /// @param response The response callback. The Ice runtime calls this function from an Ice thread pool thread.
         /// If you set InitializationData::executor, the executor determines the thread that executes this function.
         /// It accepts:
@@ -557,25 +615,39 @@ namespace Ice
         /// @param sent The sent callback. The Ice runtime never calls this function: no request is sent to get a
         /// connection.
         /// @return A function that can be called to cancel the invocation locally.
+        /// @remark When this proxy reaches its target object through collocation optimization (see
+        /// #ice_collocationOptimized), the response callback receives a null connection: collocated invocations don't
+        /// use a connection.
         // NOLINTNEXTLINE(modernize-use-nodiscard)
         std::function<void()> ice_getConnectionAsync(
             std::function<void(Ice::ConnectionPtr)> response,
             std::function<void(std::exception_ptr)> ex = nullptr,
             std::function<void(bool)> sent = nullptr) const;
 
-        /// Gets the connection for this proxy. If the proxy does not yet have an established connection,
-        /// it first attempts to create a connection.
-        /// @return A future that becomes available when the invocation completes. This future holds:
+        /// Gets the connection for this proxy. If the proxy does not yet have an established connection or its
+        /// connection is closed or being closed, it first attempts to create a new connection. For a fixed proxy,
+        /// this function returns the connection this proxy is bound to, even when this connection is closed.
+        /// @return A future that becomes available when the connection is established. This future holds:
         /// - The connection for this proxy.
+        /// @remark When this proxy reaches its target object through collocation optimization (see
+        /// #ice_collocationOptimized), the future holds a null connection: collocated invocations don't use a
+        /// connection.
         [[nodiscard]] std::future<Ice::ConnectionPtr> ice_getConnectionAsync() const;
 
         /// @private
         void _iceI_getConnection(const std::shared_ptr<IceInternal::ProxyGetConnection>&) const;
 
-        /// Gets the cached Connection for this proxy. If the proxy does not yet have an established connection, it does
-        /// not attempt to create a connection.
-        /// @return The cached connection for this proxy, or nullptr if the proxy does not have an established
-        /// connection.
+        /// Gets the Connection cached by this proxy. Once this proxy has been associated with a connection
+        /// (typically during its first invocation), it caches this connection and continues using it for subsequent
+        /// invocations, until an invocation on this proxy fails. This function never attempts to establish a
+        /// connection. For a fixed proxy, this function returns the connection this proxy is bound to, even when
+        /// this connection is closed.
+        /// @return The cached connection, or nullptr if this proxy doesn't have a cached connection. The returned
+        /// connection can be closed.
+        /// @remark A proxy with connection caching disabled (see #ice_connectionCached) never caches a connection: for
+        /// such a proxy, this function always returns nullptr. This function also returns nullptr when this proxy
+        /// reaches its target object through collocation optimization (see #ice_collocationOptimized): collocated
+        /// invocations don't use a connection.
         [[nodiscard]] Ice::ConnectionPtr ice_getCachedConnection() const noexcept;
 
         /// Flushes any pending batched requests for this proxy. The call blocks until the flush is complete.
@@ -663,8 +735,9 @@ namespace Ice
         /// @return The locator for this proxy. If no locator is configured, the return value is nullopt.
         [[nodiscard]] std::optional<LocatorPrx> ice_getLocator() const noexcept;
 
-        /// Determines whether this proxy uses collocation optimization.
-        /// @return `true` if the proxy uses collocation optimization, `false` otherwise.
+        /// Determines whether this proxy has collocation optimization enabled.
+        /// @return `true` if this proxy has collocation optimization enabled, `false` otherwise.
+        /// @see #ice_collocationOptimized
         [[nodiscard]] bool ice_isCollocationOptimized() const noexcept;
 
         /// Gets the invocation timeout of this proxy.

@@ -21,16 +21,6 @@ namespace Slice::Python
         Dispatch
     };
 
-    /// Represents the scope of an import statement—either required at runtime or only used for type hints.
-    enum class ImportScope
-    {
-        /// The import is required at runtime by the generated Python code.
-        RuntimeImport,
-
-        /// The import is only used for type hints and is not needed at runtime.
-        TypingImport
-    };
-
     // The context a type will be used in.
     enum class InterfaceTypeContext
     {
@@ -91,6 +81,9 @@ namespace Slice::Python
 
         /// Whether this code fragment is a package index file.
         bool isPackageIndex = false;
+
+        /// Whether the generated code references the IcePy module. Fragments that only define constants don't.
+        bool usesIcePy = true;
 
         /// The generated code.
         std::string code;
@@ -175,9 +168,6 @@ namespace Slice::Python
     /// @param p The Slice definition to get the meta-type name for.
     /// @return The name of the meta-type for the given Slice definition.
     std::string getMetaType(const SyntaxTreeBasePtr& p);
-
-    /// Helper method to emit the generated code that format the fields of a type in __repr__ implementation.
-    std::string formatFields(const DataMemberList& members);
 
     CodeFragment createCodeFragmentForPythonModule(const ContainedPtr& contained, const std::string& code);
 
@@ -298,14 +288,18 @@ namespace Slice::Python
         }
 
     private:
-        /// Add the runtime imports for the given Sequence definition.
+        /// Add any necessary imports for the given Sequence definition.
         /// @param sequence The Sequence definition being imported.
         /// @param source The Slice definition that requires the import.
-        /// @param localMetadata Any additional metadata associated with the import. Such has parameter metadata.
-        void addRuntimeImportForSequence(
+        /// @param isFieldType Whether the provided sequence is the type of a field.
+        /// Only fields need runtime imports for the sequence's mapped type so their default factories can construct it.
+        /// @param localMetadata Any metadata that is applied to where the sequence is used;
+        /// this takes precedence over metadata applied to the sequence's definition.
+        void addSequenceImports(
             const SequencePtr& sequence,
             const ContainedPtr& source,
-            const MetadataList& localMetadata = MetadataList());
+            bool isFieldType,
+            const MetadataList& localMetadata);
 
         /// Adds a runtime import for the given Slice definition if it comes from a different module.
         /// @param definition The Slice definition to import.
@@ -331,16 +325,18 @@ namespace Slice::Python
         /// @param source The Slice definition that requires this import.
         void addTypingImport(const std::string& moduleName, const std::string& definition, const ContainedPtr& source);
 
-        /// Adds a typing import for the package containing the given Slice definition.
+        /// Adds all the necessary typing imports for the given Slice type.
         ///
         /// Typing imports are generated inside an `if TYPE_CHECKING:` block, so they are only used for type hints.
         ///
-        /// @param definition The definition to import the containing package.
+        /// @param type The type to generate imports for.
         /// @param source The Slice definition that requires this import.
-        /// @param forMarshaling If true, the sequence is used for marshaling (invocation input parameter, or dispatch
-        /// output parameter).
-        void
-        addTypingImport(const SyntaxTreeBasePtr& definition, const ContainedPtr& source, bool forMarshaling = false);
+        /// @param localMetadata Any metadata that is applied to where the type is used;
+        /// this takes precedence over metadata applied to the type's definition.
+        void addTypingImport(
+            const TypePtr& type,
+            const ContainedPtr& source,
+            const MetadataList& localMetadata = MetadataList());
 
         /// Import the meta type for the given Slice definition if it comes from a different module.
         /// @param definition is the Slice definition to import.
@@ -374,13 +370,8 @@ namespace Slice::Python
     class CodeVisitor final : public ParserVisitor
     {
     public:
-        CodeVisitor(
-            ImportsMap runtimeImports,
-            ImportsMap typingImports,
-            std::map<std::string, std::map<std::string, std::string>> allImports)
-            : _runtimeImports(std::move(runtimeImports)),
-              _typingImports(std::move(typingImports)),
-              _allImports(std::move(allImports))
+        CodeVisitor(std::map<std::string, std::map<std::string, std::string>> allImports)
+            : _allImports(std::move(allImports))
         {
         }
 
@@ -469,9 +460,6 @@ namespace Slice::Python
         // The list of generated Python code fragments in the current translation unit.
         // Each fragment corresponds to a Python module generated from a Slice definition with the same name.
         std::vector<CodeFragment> _codeFragments;
-
-        ImportsMap _runtimeImports;
-        ImportsMap _typingImports;
 
         /// A map of all import names for each source module.
         /// - Key: the Python generated module name.

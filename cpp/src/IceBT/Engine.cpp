@@ -8,6 +8,9 @@
 #include "Util.h"
 
 #include <algorithm>
+#include <cassert>
+#include <map>
+#include <mutex>
 #include <thread>
 
 using namespace std;
@@ -455,24 +458,6 @@ namespace IceBT
             return false;
         }
 
-        bool deviceExists(const string& addr) const
-        {
-            lock_guard lock(_mutex);
-
-            //
-            // Check if a remote device exists with the given device address.
-            //
-            for (const auto& remoteDevice : _remoteDevices)
-            {
-                if (remoteDevice.second.getAddress() == IceInternal::toUpper(addr))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         //
         // Calling registerProfile will advertise a service (SDP) profile with the Bluetooth daemon.
         //
@@ -525,6 +510,9 @@ namespace IceBT
             }
             catch (const DBus::Exception& ex)
             {
+                // Always remove the local service so we don't leak the profile and its callback chain on the
+                // long-lived DBus connection. removeService is a no-op if the service was already removed.
+                _dbusConnection->removeService(path);
                 throw BluetoothException{__FILE__, __LINE__, ex.reason};
             }
         }
@@ -701,7 +689,6 @@ namespace IceBT
 
                 _adapters.clear();
                 _remoteDevices.clear();
-                _defaultAdapterAddress.clear();
 
                 //
                 // The return value of GetManagedObjects is a dictionary structured like this:
@@ -1088,7 +1075,7 @@ namespace IceBT
             // 2) After we find the remote device, we have to register a client profile
             //    for the given UUID.
             //
-            // 3) After registering the profile, we have to invoke ConnectDevice on the
+            // 3) After registering the profile, we have to invoke ConnectProfile on the
             //    local device object corresponding to the target address. The Bluetooth
             //    service will attempt to establish a connection to the remote device.
             //    If the connection succeeds, our profile object will receive a
@@ -1225,7 +1212,6 @@ namespace IceBT
 
         AdapterMap _adapters;
         RemoteDeviceMap _remoteDevices;
-        string _defaultAdapterAddress;
         vector<thread> _connectThreads;
     };
 }
@@ -1262,12 +1248,6 @@ bool
 IceBT::Engine::adapterExists(const string& addr) const
 {
     return _service->adapterExists(addr);
-}
-
-bool
-IceBT::Engine::deviceExists(const string& addr) const
-{
-    return _service->deviceExists(addr);
 }
 
 string

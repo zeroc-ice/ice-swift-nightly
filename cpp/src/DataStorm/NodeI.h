@@ -57,15 +57,21 @@ namespace DataStormI
             const Ice::ConnectionPtr&,
             std::shared_ptr<SubscriberSessionI>);
 
+        /// Handles the failure of a session creation attempt. The last parameter is the value
+        /// SessionI::connectAttempt returned when the attempt was started; a reply from a superseded attempt is
+        /// discarded rather than charged against the current attempt's retry budget.
         void retrySubscriberSessionCreation(
             const DataStormContract::NodePrx&,
             const std::shared_ptr<SubscriberSessionI>&,
-            std::exception_ptr);
+            std::exception_ptr,
+            std::int64_t);
 
+        /// @copydoc retrySubscriberSessionCreation
         void retryPublisherSessionCreation(
             const DataStormContract::NodePrx&,
             const std::shared_ptr<PublisherSessionI>&,
-            std::exception_ptr);
+            std::exception_ptr,
+            std::int64_t);
 
         void removeSubscriberSession(
             const DataStormContract::NodePrx&,
@@ -119,7 +125,7 @@ namespace DataStormI
         // A map of all publisher sessions, indexed by the identity of the peer node.
         std::map<Ice::Identity, std::shared_ptr<PublisherSessionI>> _publishers;
 
-        // A proxy to a colocated publisher session object that forwards requests to all active publisher sessions.
+        // A proxy to a collocated publisher session object that forwards requests to all active publisher sessions.
         DataStormContract::PublisherSessionPrx _publisherForwarder;
 
         // A map of all publisher sessions, indexed by the identity of each session.
@@ -128,7 +134,7 @@ namespace DataStormI
         // A map of all subscriber sessions, indexed by the identity of the peer node.
         std::map<Ice::Identity, std::shared_ptr<SubscriberSessionI>> _subscribers;
 
-        // A proxy to a colocated subscriber session object that forwards requests to all active subscriber sessions.
+        // A proxy to a collocated subscriber session object that forwards requests to all active subscriber sessions.
         DataStormContract::SubscriberSessionPrx _subscriberForwarder;
 
         // A map of all subscriber sessions, indexed by the identity of each session.

@@ -52,6 +52,23 @@ namespace
     const string _iceProtocol = "ice.zeroc.com";                   // NOLINT(cert-err58-cpp)
     const string _wsUUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"; // NOLINT(cert-err58-cpp)
 
+    // Returns true if the Connection header field - a comma-separated list of tokens, already trimmed and lowercased
+    // by HttpParser::getHeader - includes the "upgrade" token required by RFC 6455 section 4.
+    bool hasUpgradeToken(string_view connectionField)
+    {
+        while (!connectionField.empty())
+        {
+            auto comma = connectionField.find(',');
+            string_view token = connectionField.substr(0, comma);
+            connectionField.remove_prefix(comma == string_view::npos ? connectionField.size() : comma + 1);
+            if (IceInternal::trim(token) == "upgrade")
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     //
     // Rename to avoid conflict with OS 10.10 htonll
     //
@@ -420,10 +437,10 @@ IceInternal::WSTransceiver::closing(bool initiator, exception_ptr reason)
     {
         //
         // If we initiated a close connection but also received a
-        // close connection, we assume we didn't initiated the
-        // connection and we send the close frame now. This is to
+        // close connection, we assume we didn't initiate the
+        // close and we send the close frame now. This is to
         // ensure that if both peers close the connection at the same
-        // time we don't hang having both peer waiting for the close
+        // time we don't hang having both peers waiting for the close
         // frame of the other.
         //
         assert(!initiator);
@@ -575,8 +592,8 @@ IceInternal::WSTransceiver::read(Buffer& buf)
     }
 
     //
-    // If we read the full Ice message, handle it before trying
-    // reading anymore data from the WS connection.
+    // If we read the full Ice message, handle it before trying to
+    // read any more data from the WS connection.
     //
     if (buf.i == buf.b.end())
     {
@@ -963,7 +980,7 @@ IceInternal::WSTransceiver::handleRequest(Buffer& responseBuffer)
     {
         throw WebSocketException("missing value for Connection field");
     }
-    else if (val.find("upgrade") == string::npos)
+    else if (!hasUpgradeToken(val))
     {
         throw WebSocketException("invalid value '" + val + "' for Connection field");
     }
@@ -1142,7 +1159,7 @@ IceInternal::WSTransceiver::handleResponse()
     {
         throw WebSocketException("missing value for Connection field");
     }
-    else if (val.find("upgrade") == string::npos)
+    else if (!hasUpgradeToken(val))
     {
         throw WebSocketException("invalid value '" + val + "' for Connection field");
     }
@@ -1654,7 +1671,7 @@ IceInternal::WSTransceiver::preWrite(Buffer& buf)
         // 32-bit value, so we copy the entire message into the internal buffer
         // for writing. For incoming connections, we just copy the start of the
         // message in the internal buffer after the header. If the message is
-        // larger, the reminder is sent directly from the message buffer to avoid
+        // larger, the remainder is sent directly from the message buffer to avoid
         // copying.
         //
 

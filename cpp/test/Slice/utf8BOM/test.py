@@ -1,13 +1,15 @@
 # Copyright (c) ZeroC, Inc.
 
+from __future__ import annotations
+
 import os
 import shutil
 
-from Util import ClientTestCase, Linux, SliceTranslator, TestSuite, platform
+from Util import ClientTestCase, Driver, Linux, SliceTranslator, TestSuite, platform
 
 
 class SliceUtf8BomTestCase(ClientTestCase):
-    def runClientSide(self, current):
+    def runClientSide(self, current: Driver.Current) -> None:
         test_file_name = "Test.ice"
         slice2cpp = SliceTranslator("slice2cpp", quiet=True)
 
@@ -34,7 +36,7 @@ class SliceUtf8BomTestCase(ClientTestCase):
             lines = output.strip().splitlines()
 
             # There is a known issue with MCPP on certain Linux platforms which causes the Slice compiler to erroneously
-            # report valid UTF-8 BOMS. See https://github.com/zeroc-ice/ice/issues/3940
+            # report valid UTF-8 BOMS. See #3940.
             if len(lines) == 2 and isinstance(platform, Linux):
                 if lines[0].endswith(
                     "Test.ice:2: encountered unexpected UTF-8 BOM in input; BOMs can only appear at the beginning of files"

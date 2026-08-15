@@ -101,9 +101,8 @@ namespace
             }
 
             // Ensure that the previous updates were committed, the setProperties call returns before
-            // notifying the callbacks so to ensure all the update callbacks have be notified we call
-            // a second time, this will block until all the notifications from the first update have
-            // completed.
+            // notifying the callbacks, so to ensure all the update callbacks have been notified we call
+            // a second time. This will block until all the notifications from the first update have completed.
             _serverProps->setProperties(Ice::PropertyDict());
 
             lock_guard lock(_mutex);
@@ -493,7 +492,7 @@ allTests(Test::TestHelper* helper, const CommunicatorObserverIPtr& obsv)
     string isSecure;
     if (!collocated)
     {
-        Ice::EndpointInfoPtr endpointInfo = metrics->ice_getConnection()->getEndpoint()->getInfo();
+        Ice::EndpointInfoPtr endpointInfo = metrics->ice_getCachedConnection()->getEndpoint()->getInfo();
         {
             ostringstream os;
             os << endpointInfo->type();
@@ -607,7 +606,7 @@ allTests(Test::TestHelper* helper, const CommunicatorObserverIPtr& obsv)
         props["IceMX.Metrics.View.Map.Connection.GroupBy"] = "none";
         updateProps(clientProps, serverProps, update.get(), props, "Connection");
 
-        metrics->ice_getConnection()->close().get();
+        metrics->ice_getCachedConnection()->close().get();
 
         // TODO: this appears necessary on slow macos VMs to give time to the server to clean-up the connection.
         this_thread::sleep_for(chrono::milliseconds(100));

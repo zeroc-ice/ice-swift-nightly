@@ -55,6 +55,8 @@ namespace Ice::SSL::OpenSSL
     private:
         friend class Ice::SSL::OpenSSL::SSLEngine;
 
+        void invalidateBIOFd() const;
+
         const InstancePtr _instance;
         const Ice::SSL::OpenSSL::SSLEnginePtr _engine;
         const std::string _host;
@@ -62,7 +64,6 @@ namespace Ice::SSL::OpenSSL
         const bool _incoming;
         const IceInternal::TransceiverPtr _delegate;
         bool _connected;
-        std::string _cipher;
         X509* _peerCertificate;
         ::SSL* _ssl;
         SSL_CTX* _sslCtx;

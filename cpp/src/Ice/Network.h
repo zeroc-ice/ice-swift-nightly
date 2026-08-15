@@ -5,9 +5,7 @@
 
 #include "Ice/Config.h"
 #include "Ice/EndpointTypes.h"
-#include "Ice/Logger.h"      // For setTcpBufSize
-#include "Ice/PropertiesF.h" // For setTcpBufSize
-#include "Ice/StringUtil.h"  // For ErrorCode
+#include "Ice/StringUtil.h" // For ErrorCode
 #include "NetworkF.h"
 #include "NetworkProxyF.h"
 #include "Protocol.h"
@@ -45,7 +43,7 @@ typedef int ssize_t;
 #    error "Unsupported platform"
 #endif
 
-#if defined(_WIN32) || defined(__osf__)
+#if defined(_WIN32)
 typedef int socklen_t;
 #endif
 
@@ -147,6 +145,10 @@ namespace IceInternal
 
         [[nodiscard]] SOCKET fd() const { return _fd; }
 
+        // Forgets the fd. Called when a failed socket operation has already closed the fd, so that close() does not
+        // close an unrelated descriptor later assigned the same number.
+        void clearFd() noexcept { _fd = INVALID_SOCKET; }
+
         void setReadyCallback(const ReadyCallbackPtr& callback);
 
         void ready(SocketOperation operation, bool value)
@@ -212,7 +214,6 @@ namespace IceInternal
     ICE_API void setPort(Address&, int);
 
     ICE_API bool isMulticast(const Address&);
-    ICE_API void setTcpBufSize(SOCKET, const ProtocolInstancePtr&);
     ICE_API void setTcpBufSize(SOCKET, int, int, const ProtocolInstancePtr&);
 
     ICE_API void setBlock(SOCKET, bool);
@@ -220,6 +221,10 @@ namespace IceInternal
     ICE_API int getSendBufferSize(SOCKET);
     ICE_API void setRecvBufferSize(SOCKET, int);
     ICE_API int getRecvBufferSize(SOCKET);
+
+    // Non-throwing variants that return 0 on failure and never close the fd.
+    ICE_API int getSendBufferSizeNoThrow(SOCKET) noexcept;
+    ICE_API int getRecvBufferSizeNoThrow(SOCKET) noexcept;
 
     ICE_API void setMcastGroup(SOCKET, const Address&, const std::string&);
     ICE_API void setMcastInterface(SOCKET, const std::string&, const Address&);

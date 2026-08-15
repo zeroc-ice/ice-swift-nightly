@@ -4,6 +4,7 @@
 #include "NodeI.h"
 #include "SessionI.h"
 #include "TopicFactoryI.h"
+#include "TraceUtil.h"
 
 using namespace std;
 using namespace DataStormI;
@@ -14,7 +15,14 @@ namespace
 {
     static Topic::Updater noOpUpdater = // NOLINT(cert-err58-cpp)
         [](const shared_ptr<Sample>& previous, const shared_ptr<Sample>& next, const CommunicatorPtr&)
-    { next->setValue(previous); };
+    {
+        // Every updater call site ensures the previous sample exists and has a value before invoking the updater
+        // (the writer throws otherwise, the reader drops the sample), so this assert holds. A broken invariant is not
+        // made safe here: setValue(nullptr) stores a default-constructed value with _hasValue == true, resurrecting
+        // the removed key from a default value — the very bug the call sites prevent.
+        assert(previous && previous->hasValue());
+        next->setValue(previous && previous->hasValue() ? previous : nullptr);
+    };
 
     // The always match filter always matches the value, it's used by the any key reader/writer.
     class AlwaysMatchFilter final : public Filter
@@ -61,7 +69,7 @@ TopicI::TopicI(
       _instance(std::move(instance)),
       _traceLevels(_instance->getTraceLevels()),
       _id(id),
-      // The collocated forwarder is initalized here to avoid using a nullable proxy. The forwarder is only used by
+      // The collocated forwarder is initialized here to avoid using a nullable proxy. The forwarder is only used by
       // the instance that owns it and is removed in destroy implementation.
       _forwarder{_instance->getCollocatedForwarder()->add<SessionPrx>(
           [this](const ByteSeq& inParams, const Current& current) { forward(inParams, current); })}
@@ -147,17 +155,64 @@ TopicI::getTags() const
     return tags;
 }
 
+bool
+TopicI::matchKeyFilter(const shared_ptr<Filter>& filter, const shared_ptr<Key>& key) const
+{
+    try
+    {
+        return filter->match(key);
+    }
+    catch (const std::exception& ex)
+    {
+        // The filter predicate is application code. Treating a throwing predicate as not matching leaves this key
+        // unattached and lets the attach continue with the topic's remaining keys and filters, the way a predicate
+        // that returns false does.
+
+        // The key's toString runs the application's formatter — more application code — so it can throw too; the
+        // placeholder keeps such a throw from escaping the guard.
+        string keyString;
+        try
+        {
+            keyString = key->toString();
+        }
+        catch (const std::exception&)
+        {
+            keyString = "<unavailable>";
+        }
+
+        Warning out(_traceLevels->logger);
+        out << "topic '" << _name << "': did not attach the elements for key '" << keyString << "': the '"
+            << filter->getName() << "' key filter failed:\n"
+            << ex.what();
+        return false;
+    }
+}
+
 ElementSpecSeq
 TopicI::getElementSpecs(int64_t topicId, const ElementInfoSeq& infos, const shared_ptr<SessionI>& session)
 {
     ElementSpecSeq specs;
-    // Iterate over the element infos representing the remote keys, and filters and compute the element spec for local
+    // Iterate over the element infos representing the remote keys and filters, and compute the element spec for local
     // keys and filters that match. Positive IDs represent keys and negative IDs represent filters.
     for (const auto& info : infos)
     {
         if (info.id > 0)
         {
-            auto key = _keyFactory->decode(_instance->getCommunicator(), info.value);
+            shared_ptr<Key> key;
+            try
+            {
+                key = _keyFactory->decode(_instance->getCommunicator(), info.value);
+            }
+            catch (const std::exception& ex)
+            {
+                // The key factory runs the application's decoder. Skip the peer key it can't decode and keep matching
+                // the remaining ones.
+                Warning out(_traceLevels->logger);
+                out << "skipped a key announced on topic '" << this << "': the key could not be decoded:\n"
+                    << ex.what();
+                continue;
+            }
+
             auto p = _keyElements.find(key);
             if (p != _keyElements.end())
             {
@@ -182,7 +237,7 @@ TopicI::getElementSpecs(int64_t topicId, const ElementInfoSeq& infos, const shar
             // Add filtered elements matching the key.
             for (const auto& [filter, filteredDataElements] : _filteredElements)
             {
-                if (filter->match(key))
+                if (matchKeyFilter(filter, key))
                 {
                     ElementDataSeq elements;
                     for (const auto& dataElement : filteredDataElements)
@@ -214,7 +269,23 @@ TopicI::getElementSpecs(int64_t topicId, const ElementInfoSeq& infos, const shar
             }
             else
             {
-                peerFilter = _keyFilterFactories->decode(_instance->getCommunicator(), info.name, info.value);
+                try
+                {
+                    peerFilter = _keyFilterFactories->decode(_instance->getCommunicator(), info.name, info.value);
+                }
+                catch (const std::exception& ex)
+                {
+                    // The key filter factory runs the application's decoder. Skip the peer filter it can't decode
+                    // rather than falling back to alwaysMatchFilter the way a null return does below: a null return
+                    // means no factory is registered under that name, while a throw leaves the filter's criteria
+                    // unknown, and matching everything would attach elements the peer's filter meant to exclude.
+                    Warning out(_traceLevels->logger);
+                    out << "skipped the key filter '" << info.name << "' announced on topic '" << this
+                        << "': the filter could not be decoded:\n"
+                        << ex.what();
+                    continue;
+                }
+
                 if (!peerFilter)
                 {
                     peerFilter = alwaysMatchFilter;
@@ -224,7 +295,7 @@ TopicI::getElementSpecs(int64_t topicId, const ElementInfoSeq& infos, const shar
             // Add key elements matching the filter.
             for (const auto& [key, keyDataElements] : _keyElements)
             {
-                if (peerFilter->match(key))
+                if (matchKeyFilter(peerFilter, key))
                 {
                     ElementDataSeq elements;
                     for (const auto& dataElement : keyDataElements)
@@ -305,7 +376,7 @@ TopicI::attach(int64_t topicId, shared_ptr<SessionI> session, SessionPrx peerSes
     // If the topic ID is successfully added, instruct the session to subscribe to the topic.
     if (p->second.topics.insert(topicId).second)
     {
-        p->first->subscribe(topicId, this);
+        p->first->subscribe(topicId, shared_from_this());
     }
 }
 
@@ -316,7 +387,7 @@ TopicI::detach(int64_t topicId, const shared_ptr<SessionI>& session)
     if (p != _listeners.end() && p->second.topics.erase(topicId))
     {
         // If the topic ID is removed, instruct the session to unsubscribe from the topic.
-        session->unsubscribe(topicId, this);
+        session->unsubscribe(topicId, shared_from_this());
 
         // If the session has no remaining subscribed topics, remove its listener from the list.
         if (p->second.topics.empty())
@@ -356,7 +427,22 @@ TopicI::attachElements(
                     }
                     else
                     {
-                        filter = _keyFilterFactories->decode(_instance->getCommunicator(), spec.name, spec.value);
+                        try
+                        {
+                            filter = _keyFilterFactories->decode(_instance->getCommunicator(), spec.name, spec.value);
+                        }
+                        catch (const std::exception& ex)
+                        {
+                            // The key filter factory runs the application's decoder. Skip this spec and keep
+                            // attaching the remaining ones. Falling back to alwaysMatchFilter the way a null return
+                            // does would attach elements the peer's filter meant to exclude.
+                            Warning out(_traceLevels->logger);
+                            out << "skipped the elements of key filter '" << spec.name << "' on topic '" << this
+                                << "': the filter could not be decoded:\n"
+                                << ex.what();
+                            continue;
+                        }
+
                         if (!filter)
                         {
                             filter = alwaysMatchFilter;
@@ -365,7 +451,7 @@ TopicI::attachElements(
                 }
 
                 // Iterate over the data elements for the matching key, attaching them to the data elements of the spec.
-                if (spec.id > 0 || filter->match(key))
+                if (spec.id > 0 || matchKeyFilter(filter, key))
                 {
                     for (const auto& dataElement : p->second)
                     {
@@ -407,10 +493,23 @@ TopicI::attachElements(
                 shared_ptr<Key> key;
                 if (spec.id > 0) // Key
                 {
-                    key = _keyFactory->decode(_instance->getCommunicator(), spec.value);
+                    try
+                    {
+                        key = _keyFactory->decode(_instance->getCommunicator(), spec.value);
+                    }
+                    catch (const std::exception& ex)
+                    {
+                        // The key factory runs the application's decoder. Skip this spec and keep attaching the
+                        // remaining ones.
+                        Warning out(_traceLevels->logger);
+                        out << "skipped the elements announced under a key on topic '" << this
+                            << "': the key could not be decoded:\n"
+                            << ex.what();
+                        continue;
+                    }
                 }
 
-                if (spec.id < 0 || filter->match(key))
+                if (spec.id < 0 || matchKeyFilter(filter, key))
                 {
                     for (const auto& dataElement : p->second)
                     {
@@ -447,7 +546,7 @@ TopicI::attachElementsAck(
     const chrono::time_point<chrono::system_clock>& now,
     LongSeq& removedIds)
 {
-    DataSamplesSeq samples;
+    DataSamplesSeq batches;
     vector<function<void()>> initCallbacks;
     for (const auto& spec : elements)
     {
@@ -466,10 +565,24 @@ TopicI::attachElementsAck(
                     }
                     else
                     {
-                        filter = _keyFilterFactories->decode(_instance->getCommunicator(), spec.name, spec.value);
-                        if (!filter)
+                        try
                         {
-                            filter = alwaysMatchFilter;
+                            filter = _keyFilterFactories->decode(_instance->getCommunicator(), spec.name, spec.value);
+                            if (!filter)
+                            {
+                                filter = alwaysMatchFilter;
+                            }
+                        }
+                        catch (const std::exception& ex)
+                        {
+                            // The key filter factory runs the application's decoder. Leave the filter null — falling
+                            // back to alwaysMatchFilter the way a null return does would attach elements the peer's
+                            // filter meant to exclude. Skipping the whole spec would drop the removedIds bookkeeping
+                            // along with the attachments.
+                            Warning out(_traceLevels->logger);
+                            out << "skipped the acknowledged elements of key filter '" << spec.name << "' on topic '"
+                                << this << "': the filter could not be decoded:\n"
+                                << ex.what();
                         }
                     }
                 }
@@ -485,12 +598,12 @@ TopicI::attachElementsAck(
                             if (spec.id > 0) // Key
                             {
                                 initCb = dataElement
-                                             ->attach(topicId, spec.id, key, nullptr, session, prx, data, now, samples);
+                                             ->attach(topicId, spec.id, key, nullptr, session, prx, data, now, batches);
                             }
-                            else if (filter->match(key)) // Filter
+                            else if (filter && matchKeyFilter(filter, key)) // Filter
                             {
                                 initCb = dataElement
-                                             ->attach(topicId, spec.id, key, filter, session, prx, data, now, samples);
+                                             ->attach(topicId, spec.id, key, filter, session, prx, data, now, batches);
                             }
 
                             if (initCb)
@@ -534,7 +647,19 @@ TopicI::attachElementsAck(
                 shared_ptr<Key> key;
                 if (spec.id > 0) // Key
                 {
-                    key = _keyFactory->decode(_instance->getCommunicator(), spec.value);
+                    try
+                    {
+                        key = _keyFactory->decode(_instance->getCommunicator(), spec.value);
+                    }
+                    catch (const std::exception& ex)
+                    {
+                        // The key factory runs the application's decoder. Leave the key null. Skipping the whole spec
+                        // would drop the removedIds bookkeeping along with the attachments.
+                        Warning out(_traceLevels->logger);
+                        out << "skipped the acknowledged elements announced under a key on topic '" << this
+                            << "': the key could not be decoded:\n"
+                            << ex.what();
+                    }
                 }
 
                 for (const auto& data : spec.elements)
@@ -549,12 +674,12 @@ TopicI::attachElementsAck(
                             {
                                 initCb =
                                     dataElement
-                                        ->attach(topicId, spec.id, nullptr, filter, session, prx, data, now, samples);
+                                        ->attach(topicId, spec.id, nullptr, filter, session, prx, data, now, batches);
                             }
-                            else if (filter->match(key))
+                            else if (key && matchKeyFilter(filter, key))
                             {
                                 initCb = dataElement
-                                             ->attach(topicId, spec.id, key, nullptr, session, prx, data, now, samples);
+                                             ->attach(topicId, spec.id, key, nullptr, session, prx, data, now, batches);
                             }
 
                             if (initCb)
@@ -587,7 +712,7 @@ TopicI::attachElementsAck(
     {
         initCb();
     }
-    return samples;
+    return batches;
 }
 
 void
@@ -754,6 +879,7 @@ void
 TopicI::disconnect()
 {
     map<shared_ptr<SessionI>, Listener> listeners;
+    auto self = shared_from_this();
     {
         unique_lock<mutex> lock(_mutex);
         listeners.swap(_listeners);
@@ -763,7 +889,7 @@ TopicI::disconnect()
     {
         for (const auto& id : listener.topics)
         {
-            session->disconnect(id, this);
+            session->disconnect(id, self);
         }
     }
 
@@ -781,7 +907,7 @@ TopicI::forward(const ByteSeq& inParams, const Current& current) const
     // Forwarder proxy must be called with the mutex locked!
     for (const auto& [_, listener] : _listeners)
     {
-        // Forward the call to all listeners using its session proxy, passing nullptr for the callbacks because we
+        // Forward the call to all listeners using their session proxies, passing nullptr for the callbacks because we
         // don't need to check the result.
         listener.proxy
             ->ice_invokeAsync(current.operation, current.mode, inParams, nullptr, nullptr, nullptr, current.ctx);

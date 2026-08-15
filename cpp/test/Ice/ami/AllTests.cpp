@@ -742,8 +742,6 @@ allTests(TestHelper* helper, bool collocated)
 
     cout << "testing unexpected exceptions from callback... " << flush;
     {
-        TestIntfPrx q = p->ice_adapterId("dummy");
-
         for (int i = 0; i < 4; ++i) // NOLINT(modernize-loop-convert): clang-tidy confusion
         {
             {
@@ -784,6 +782,51 @@ allTests(TestHelper* helper, bool collocated)
                 }
                 catch (const exception&)
                 {
+                    test(false);
+                }
+            }
+
+            {
+                promise<void> promise;
+                p->ice_getConnectionAsync(
+                    [&, i](const Ice::ConnectionPtr&)
+                    {
+                        promise.set_value();
+                        thrower(throwEx[i]);
+                    },
+                    [&](exception_ptr) { test(false); });
+
+                try
+                {
+                    promise.get_future().get();
+                }
+                catch (const exception& ex)
+                {
+                    cerr << ex.what() << endl;
+                    test(false);
+                }
+            }
+
+            {
+                promise<void> promise;
+                p->ice_invokeAsync(
+                    "op",
+                    OperationMode::Normal,
+                    vector<byte>{},
+                    [&, i](bool, const vector<byte>&)
+                    {
+                        promise.set_value();
+                        thrower(throwEx[i]);
+                    },
+                    [&](exception_ptr) { test(false); });
+
+                try
+                {
+                    promise.get_future().get();
+                }
+                catch (const exception& ex)
+                {
+                    cerr << ex.what() << endl;
                     test(false);
                 }
             }
@@ -886,10 +929,11 @@ allTests(TestHelper* helper, bool collocated)
                 test(p->opBatchCount() == 0);
                 auto b1 = p->ice_fixed(p->ice_getConnection())->ice_batchOneway();
                 b1->opBatch();
-                b1->ice_getConnection()->close().get();
+                auto con = b1->ice_getConnection();
+                con->close().get();
 
                 promise<void> promise;
-                b1->ice_getConnection()->flushBatchRequestsAsync(
+                con->flushBatchRequestsAsync(
                     CompressBatch::BasedOnProxy,
                     [&](exception_ptr ex) { promise.set_exception(ex); },
                     [&](bool) { promise.set_value(); });
@@ -1136,6 +1180,45 @@ allTests(TestHelper* helper, bool collocated)
                 con->close().get();
                 f.get(); // Should complete successfully.
                 fc.get();
+            }
+            {
+                // ice_getConnection establishes a new connection when the cached connection is closed.
+                auto con = p->ice_getConnection();
+                auto fixedPrx = p->ice_fixed(con);
+                test(fixedPrx->ice_getConnection() == con);
+                test(fixedPrx->ice_getCachedConnection() == con);
+                con->close().get();
+                test(p->ice_getConnection() != con);
+
+                // A fixed proxy remains bound to its connection: both connection accessors return it as is, even
+                // when it's closed and even when the proxy never made an invocation.
+                test(fixedPrx->ice_getConnection() == con);
+                test(fixedPrx->ice_getCachedConnection() == con);
+                auto freshFixedPrx = p->ice_fixed(con);
+                test(freshFixedPrx->ice_getConnection() == con);
+                test(freshFixedPrx->ice_getCachedConnection() == con);
+
+                // Same for the async variants. The response callback executes from a thread pool thread, not from
+                // the calling thread.
+                test(fixedPrx->ice_getConnectionAsync().get() == con);
+                auto r = make_shared<promise<pair<ConnectionPtr, thread::id>>>();
+                fixedPrx->ice_getConnectionAsync([r](const ConnectionPtr& c)
+                                                 { r->set_value({c, this_thread::get_id()}); });
+                auto [callbackCon, callbackThreadId] = r->get_future().get();
+                test(callbackCon == con);
+                test(callbackThreadId != this_thread::get_id());
+            }
+            {
+                // ice_getConnection also establishes a new connection when the cached connection is being closed.
+                // The held adapter can't act on the graceful close, so the connection remains in the closing state.
+                auto con = p->ice_getConnection();
+                testController->holdAdapter();
+                auto closed = con->close();
+                // The new connection can't be validated while the adapter is held, so get it asynchronously.
+                auto newConnection = p->ice_getConnectionAsync();
+                testController->resumeAdapter();
+                test(newConnection.get() != con);
+                closed.get();
             }
             {
                 //

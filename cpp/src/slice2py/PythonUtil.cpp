@@ -480,30 +480,6 @@ Slice::Python::CodeVisitor::operationReturnTypeHint(const OperationPtr& operatio
     return " -> " + returnTypeHint(operation, methodKind);
 }
 
-string
-Slice::Python::formatFields(const DataMemberList& members)
-{
-    if (members.empty())
-    {
-        return "";
-    }
-
-    ostringstream os;
-    bool first = true;
-    os << "{format_fields(";
-    for (const auto& dataMember : members)
-    {
-        if (!first)
-        {
-            os << ", ";
-        }
-        first = false;
-        os << dataMember->mappedName() << "=self." << dataMember->mappedName();
-    }
-    os << ")}";
-    return os.str();
-}
-
 Python::CodeFragment
 Slice::Python::createCodeFragmentForPythonModule(const ContainedPtr& contained, const string& code)
 {
@@ -512,6 +488,8 @@ Slice::Python::createCodeFragmentForPythonModule(const ContainedPtr& contained, 
         dynamic_pointer_cast<InterfaceDecl>(contained) || dynamic_pointer_cast<ClassDecl>(contained);
     fragment.moduleName = isForwardDeclaration ? getPythonModuleForForwardDeclaration(contained)
                                                : getPythonModuleForDefinition(contained);
+    // Every fragment defines or declares a meta type through IcePy, except the ones for constants.
+    fragment.usesIcePy = !dynamic_pointer_cast<Const>(contained);
     fragment.code = code;
     fragment.packageName = fragment.moduleName;
 
@@ -636,20 +614,23 @@ Slice::Python::ImportVisitor::visitDataMember(const DataMemberPtr& p)
 
     // Add imports required for data member types.
 
-    // For fields with a type that is a Struct, we need to import it as a RuntimeImport, to
-    // initialize the field in the constructor. For other contained types, we only need the
-    // import for type hints.
     if (auto sequence = dynamic_pointer_cast<Sequence>(type))
     {
-        addRuntimeImportForSequence(sequence, parent);
+        // For fields with a type that is a sequence, we check if it will be using a special mapping.
+        // If so, we need to import its mapped type to initialize the field in the constructor.
+        addSequenceImports(sequence, parent, true, p->getMetadata());
+        addTypingImport(sequence->type(), parent);
     }
     else if (dynamic_pointer_cast<Struct>(type) || dynamic_pointer_cast<Enum>(type))
     {
+        // For fields with a type that is a Struct or enum, we need to import it as a RuntimeImport,
+        // to initialize the field in the constructor.
         addRuntimeImport(type, parent);
     }
     else
     {
-        addTypingImport(type, parent, true);
+        // For other contained types, we only need the import for type hints.
+        addTypingImport(type, parent, p->getMetadata());
     }
     addRuntimeImportForMetaType(type, parent);
 
@@ -691,55 +672,40 @@ Slice::Python::ImportVisitor::visitInterfaceDefStart(const InterfaceDefPtr& p)
     addRuntimeImport("Ice.ObjectPrx", "checkedCastAsync", p);
     addRuntimeImport("Ice.ObjectPrx", "uncheckedCast", p);
 
+    // Required by the checkedCast and uncheckedCast signatures.
     addTypingImport("Ice.ObjectPrx", "ObjectPrx", p);
-    addTypingImport("Ice.Current", "Current", p);
 
-    // Required by the core operations, ice_isA, ice_ids, ice_id, and ice_ping.
+    // Used by every interface, with or without operations: checkedCastAsync returns an Awaitable, _ice_ids is a
+    // Sequence, and operation type hints use both.
     addTypingImport("collections.abc", "Awaitable", p);
     addTypingImport("collections.abc", "Sequence", p);
 
     // Add imports required for operation parameters and return types.
-    const OperationList& operations = p->allOperations();
+    // Only the operations defined in this interface matter: the generated code for operations inherited from base
+    // interfaces is emitted with the base interface, and the proxy and skeleton classes inherit it from the base
+    // classes.
+    const OperationList& operations = p->operations();
     if (!operations.empty())
     {
         addRuntimeImport("abc", "abstractmethod", p);
         addRuntimeImport("Ice.OperationMode", "OperationMode", p);
+
+        // The skeleton methods take a Current parameter.
+        addTypingImport("Ice.Current", "Current", p);
     }
 
     for (const auto& op : operations)
     {
-        // We need to call `addTypingImport` twice per parameter. This is required because for list the marshaling
-        // and unmarshaling code might require different type hints.
         auto ret = op->returnType();
         if (ret)
         {
-            if (auto sequence = dynamic_pointer_cast<Sequence>(ret))
-            {
-                addRuntimeImportForSequence(sequence, p, op->getMetadata());
-            }
-            else if (dynamic_pointer_cast<Dictionary>(ret))
-            {
-                addTypingImport("collections.abc", "Mapping", p);
-            }
-            addTypingImport(ret, p, false);
-            addTypingImport(ret, p, true);
-
+            addTypingImport(ret, p, op->getMetadata());
             addRuntimeImportForMetaType(ret, p);
         }
 
         for (const auto& param : op->parameters())
         {
-            if (auto sequence = dynamic_pointer_cast<Sequence>(param->type()))
-            {
-                addRuntimeImportForSequence(sequence, p, param->getMetadata());
-            }
-            else if (dynamic_pointer_cast<Dictionary>(param->type()))
-            {
-                addTypingImport("collections.abc", "Mapping", p);
-            }
-            addTypingImport(param->type(), p, false);
-            addTypingImport(param->type(), p, true);
-
+            addTypingImport(param->type(), p, param->getMetadata());
             addRuntimeImportForMetaType(param->type(), p);
         }
 
@@ -789,27 +755,26 @@ Slice::Python::ImportVisitor::visitConst(const ConstPtr& p)
 }
 
 void
-Slice::Python::ImportVisitor::addRuntimeImportForSequence(
+Slice::Python::ImportVisitor::addSequenceImports(
     const SequencePtr& sequence,
     const ContainedPtr& source,
+    bool isFieldType,
     const MetadataList& localMetadata)
 {
     auto metadata = getSequenceMetadata(sequence, localMetadata);
     auto directive = metadata ? metadata->directive() : "";
 
-    auto needsRunTimeImport = dynamic_pointer_cast<ClassDef>(source) || dynamic_pointer_cast<Struct>(source) ||
-                              dynamic_pointer_cast<Exception>(source);
-
     auto builtin = dynamic_pointer_cast<Builtin>(sequence->type());
-    if (builtin && builtin->kind() <= Builtin::KindDouble)
+    if (builtin && builtin->kind() <= Builtin::KindDouble && dynamic_pointer_cast<InterfaceDef>(source))
     {
+        // Marshaling-direction hints for a numeric sequence accept any Buffer.
         addTypingImport("collections.abc", "Buffer", source);
     }
 
     if (directive == "python:numpy.ndarray")
     {
         // Import numpy for using it in the field factory.
-        if (needsRunTimeImport)
+        if (isFieldType)
         {
             addRuntimeImport("numpy", "", source);
         }
@@ -821,7 +786,7 @@ Slice::Python::ImportVisitor::addRuntimeImportForSequence(
     else if (directive == "python:array.array")
     {
         // Import array for using it in the field factory.
-        if (needsRunTimeImport)
+        if (isFieldType)
         {
             addRuntimeImport("array", "array", source);
         }
@@ -836,7 +801,7 @@ Slice::Python::ImportVisitor::addRuntimeImportForSequence(
         auto [factory, typeHint] = splitMemoryviewArguments(arguments);
 
         // Import factory for using it in the field factory.
-        if (needsRunTimeImport)
+        if (isFieldType)
         {
             auto [factoryPackage, factoryFunction] = splitFQN(factory);
             addRuntimeImport(factoryPackage, factoryFunction, source);
@@ -849,14 +814,9 @@ Slice::Python::ImportVisitor::addRuntimeImportForSequence(
         }
         else
         {
-            // Otherwise, we have no idea what the type is so we just Any
+            // Otherwise, we have no idea what the type is so we just use 'Any'.
             addTypingImport("typing", "Any", source);
         }
-    }
-    else
-    {
-        // This is required to import the sequence element type in case it is not a built-in type.
-        addTypingImport(sequence, source, true);
     }
 }
 
@@ -995,35 +955,40 @@ Slice::Python::ImportVisitor::addTypingImport(
 
 void
 Slice::Python::ImportVisitor::addTypingImport(
-    const SyntaxTreeBasePtr& definition,
+    const TypePtr& type,
     const ContainedPtr& source,
-    bool forMarshaling)
+    const MetadataList& localMetadata)
 {
-    if (auto builtin = dynamic_pointer_cast<Builtin>(definition))
+    if (auto builtin = dynamic_pointer_cast<Builtin>(type))
     {
-        if (builtin->kind() == Builtin::KindValue)
-        {
-            addTypingImport("Ice.Value", "Value", source);
-        }
-        else if (builtin->kind() == Builtin::KindObjectProxy)
+        if (builtin->kind() == Builtin::KindObjectProxy)
         {
             addTypingImport("Ice.ObjectPrx", "ObjectPrx", source);
         }
+        else if (builtin->kind() == Builtin::KindValue)
+        {
+            addTypingImport("Ice.Value", "Value", source);
+        }
     }
-    else if (auto sequence = dynamic_pointer_cast<Sequence>(definition))
+    else if (auto sequence = dynamic_pointer_cast<Sequence>(type))
     {
-        addTypingImport(sequence->type(), source, forMarshaling);
+        addSequenceImports(sequence, source, false, localMetadata);
+        addTypingImport(sequence->type(), source);
     }
-    else if (auto dictionary = dynamic_pointer_cast<Dictionary>(definition))
+    else if (auto dictionary = dynamic_pointer_cast<Dictionary>(type))
     {
-        addTypingImport(dictionary->keyType(), source, forMarshaling);
-        addTypingImport(dictionary->valueType(), source, forMarshaling);
+        if (dynamic_pointer_cast<InterfaceDef>(source))
+        {
+            addTypingImport("collections.abc", "Mapping", source);
+        }
+        addTypingImport(dictionary->keyType(), source);
+        addTypingImport(dictionary->valueType(), source);
     }
-    else if (auto interfaceDecl = dynamic_pointer_cast<InterfaceDecl>(definition))
+    else if (auto interfaceDecl = dynamic_pointer_cast<InterfaceDecl>(type))
     {
         addTypingImport(interfaceDecl->mappedScoped("."), interfaceDecl->mappedName() + "Prx", source);
     }
-    else if (auto contained = dynamic_pointer_cast<Contained>(definition))
+    else if (auto contained = dynamic_pointer_cast<Contained>(type))
     {
         addTypingImport(contained->mappedScoped("."), contained->mappedName(), source);
     }
@@ -1596,9 +1561,7 @@ Slice::Python::CodeVisitor::visitInterfaceDefStart(const InterfaceDefPtr& p)
     out.inc();
     writeDocstring(p, out, "proxy class");
 
-    const string communicatorAlias = getImportAlias(p, "Ice.Communicator", "Communicator");
     const string objectPrxAlias = getImportAlias(p, "Ice.ObjectPrx", "ObjectPrx");
-    const string currentAlias = getImportAlias(p, "Ice.Current", "Current");
     const string formatTypeAlias = getImportAlias(p, "Ice.FormatType", "FormatType");
 
     for (const auto& operation : operations)
@@ -2368,7 +2331,7 @@ Slice::Python::CodeVisitor::writeDocstring(const ContainedPtr& p, Output& out, c
         for (const auto& field : fields)
         {
             out << nl << field->mappedName() << " : "
-                << typeToTypeHintString(field->type(), field->isOptional(), p, false);
+                << typeToTypeHintString(field->type(), field->isOptional(), p, false, field->getMetadata());
             auto q = fieldDocs.find(field->name());
             if (q != fieldDocs.end())
             {
@@ -2676,101 +2639,123 @@ namespace
     void writeImports(
         const Python::ModuleImportsMap& runtimeImports,
         const Python::ModuleImportsMap& typingImports,
+        bool usesIcePy,
         Output& out)
     {
-        out << sp;
-        out << nl << "from __future__ import annotations";
-        out << nl << "import IcePy";
-
+        // Collect the names bound by the runtime imports. Typing imports for names that are already imported at
+        // runtime are skipped.
         set<string> allImports;
-
-        // Write the runtime imports.
         for (const auto& [moduleName, moduleImports] : runtimeImports)
         {
-            out << sp;
             if (moduleImports.imported)
             {
-                out << nl << "import " << moduleName;
+                allImports.insert(moduleImports.moduleAlias.empty() ? moduleName : moduleImports.moduleAlias);
+            }
+
+            for (const auto& [name, alias] : moduleImports.definitions)
+            {
+                allImports.insert(alias.empty() ? name : alias);
+            }
+        }
+
+        // Build the `if TYPE_CHECKING:` block. It can end up empty when every typing import was skipped because the
+        // corresponding name is already imported at runtime.
+        Python::BufferedOutput outT;
+        outT << sp;
+        outT << nl << "if TYPE_CHECKING:";
+        outT.inc();
+        bool hasTypingImports = false;
+        for (const auto& [moduleName, moduleImports] : typingImports)
+        {
+            if (moduleImports.imported)
+            {
+                outT << nl << "import " << moduleName;
                 if (moduleImports.moduleAlias.empty())
                 {
                     allImports.insert(moduleName);
                 }
                 else
                 {
-                    out << " as " << moduleImports.moduleAlias;
+                    outT << " as " << moduleImports.moduleAlias;
                     allImports.insert(moduleImports.moduleAlias);
+                }
+                hasTypingImports = true;
+            }
+
+            for (const auto& [name, alias] : moduleImports.definitions)
+            {
+                bool alreadyImported = !allImports.insert(alias.empty() ? name : alias).second;
+
+                if (alreadyImported)
+                {
+                    continue; // Skip already imported names.
+                }
+
+                outT << nl << "from " << moduleName << " import " << name;
+                if (!alias.empty())
+                {
+                    outT << " as " << alias;
+                }
+                hasTypingImports = true;
+            }
+        }
+        outT.dec();
+
+        out << sp;
+        out << nl << "from __future__ import annotations";
+        if (usesIcePy)
+        {
+            out << nl << "import IcePy";
+        }
+
+        // Write the runtime imports.
+        for (const auto& [moduleName, moduleImports] : runtimeImports)
+        {
+            // addTypingImport registers a runtime TYPE_CHECKING import unconditionally, including when it registers
+            // no typing import at all because the definition lives in the source module. Drop the import when the
+            // block it's for ends up empty.
+            set<pair<string, string>> definitions = moduleImports.definitions;
+            if (!hasTypingImports && moduleName == "typing")
+            {
+                // The registration is aliased when the module defines its own TYPE_CHECKING.
+                auto it = find_if(
+                    definitions.begin(),
+                    definitions.end(),
+                    [](const auto& definition) { return definition.first == "TYPE_CHECKING"; });
+                if (it != definitions.end())
+                {
+                    definitions.erase(it);
                 }
             }
 
-            if (!moduleImports.definitions.empty())
+            if (!moduleImports.imported && definitions.empty())
             {
-                for (const auto& [name, alias] : moduleImports.definitions)
+                continue;
+            }
+
+            out << sp;
+            if (moduleImports.imported)
+            {
+                out << nl << "import " << moduleName;
+                if (!moduleImports.moduleAlias.empty())
                 {
-                    out << nl << "from " << moduleName << " import " << name;
-                    if (!alias.empty())
-                    {
-                        out << " as " << alias;
-                        allImports.insert(alias);
-                    }
-                    else
-                    {
-                        allImports.insert(name);
-                    }
+                    out << " as " << moduleImports.moduleAlias;
+                }
+            }
+
+            for (const auto& [name, alias] : definitions)
+            {
+                out << nl << "from " << moduleName << " import " << name;
+                if (!alias.empty())
+                {
+                    out << " as " << alias;
                 }
             }
         }
 
-        // Write typing imports
-        if (!typingImports.empty())
+        if (hasTypingImports)
         {
-            Python::BufferedOutput outT;
-            outT << sp;
-            outT << nl << "if TYPE_CHECKING:";
-            outT.inc();
-            bool hasTypingImports = false;
-            for (const auto& [moduleName, moduleImports] : typingImports)
-            {
-                if (moduleImports.imported)
-                {
-                    outT << nl << "import " << moduleName;
-                    if (moduleImports.moduleAlias.empty())
-                    {
-                        allImports.insert(moduleName);
-                    }
-                    else
-                    {
-                        outT << " as " << moduleImports.moduleAlias;
-                        allImports.insert(moduleImports.moduleAlias);
-                    }
-                    hasTypingImports = true;
-                }
-
-                if (!moduleImports.definitions.empty())
-                {
-                    for (const auto& [name, alias] : moduleImports.definitions)
-                    {
-                        bool alreadyImported = !allImports.insert(alias.empty() ? name : alias).second;
-
-                        if (alreadyImported)
-                        {
-                            continue; // Skip already imported names.
-                        }
-
-                        outT << nl << "from " << moduleName << " import " << name;
-                        if (!alias.empty())
-                        {
-                            outT << " as " << alias;
-                        }
-                        hasTypingImports = true;
-                    }
-                }
-            }
-            outT.dec();
-
-            if (hasTypingImports)
-            {
-                out << outT.str();
-            }
+            out << outT.str();
         }
     }
 }
@@ -2834,10 +2819,7 @@ Slice::Python::compile(
 
                 if (compilationKind == CompilationKind::All || compilationKind == CompilationKind::Module)
                 {
-                    CodeVisitor codeVisitor{
-                        importVisitor.getRuntimeImports(),
-                        importVisitor.getTypingImports(),
-                        importVisitor.getAllImportNames()};
+                    CodeVisitor codeVisitor{importVisitor.getAllImportNames()};
                     unit->visit(&codeVisitor);
 
                     const vector<CodeFragment>& newFragments = codeVisitor.codeFragments();
@@ -2871,7 +2853,11 @@ Slice::Python::compile(
         {
             Python::BufferedOutput out;
             writeHeader(out);
-            writeImports(runtimeImports[fragment.moduleName], typingImports[fragment.moduleName], out);
+            writeImports(
+                runtimeImports[fragment.moduleName],
+                typingImports[fragment.moduleName],
+                fragment.usesIcePy,
+                out);
             out << sp;
             out << fragment.code;
 

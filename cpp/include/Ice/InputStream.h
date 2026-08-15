@@ -510,7 +510,7 @@ namespace Ice
         void read(std::vector<std::int32_t>& v);
 
         /// Reads a long from the stream.
-        /// @param[out]v The extracted long.
+        /// @param[out] v The extracted long.
         void read(std::int64_t& v);
 
         /// Reads a sequence of longs from the stream.
@@ -625,7 +625,7 @@ namespace Ice
         /// @param size The number of bytes to skip.
         void skip(size_type size)
         {
-            if (i + size > b.end())
+            if (size > static_cast<size_type>(b.end() - i))
             {
                 throwUnmarshalOutOfBoundsException(__FILE__, __LINE__);
             }

@@ -4,6 +4,7 @@
 #define ICE_NETWORK_PROXY_H
 
 #include "Ice/Buffer.h"
+#include "Ice/PropertiesF.h"
 #include "Network.h"
 
 namespace IceInternal
@@ -39,7 +40,7 @@ namespace IceInternal
         // If the proxy host needs to be resolved, this should return
         // a new NetworkProxy containing the IP address of the proxy.
         // This is called from the endpoint host resolver thread, so
-        // it's safe if this this method blocks.
+        // it's safe if this method blocks.
         //
         [[nodiscard]] virtual NetworkProxyPtr resolveHost(ProtocolSupport) const = 0;
 

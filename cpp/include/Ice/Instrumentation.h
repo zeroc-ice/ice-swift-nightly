@@ -103,6 +103,9 @@ namespace Ice::Instrumentation
     };
 
     /// The base class for Ice observers.
+    /// @remark The Ice runtime calls observers from contexts where exceptions cannot be handled, such as destructors
+    /// and `noexcept` functions. Implementations of this interface and its derived interfaces must not throw
+    /// exceptions: a thrown exception can terminate the process.
     /// @headerfile Ice/Ice.h
     class Observer
     {
@@ -222,14 +225,14 @@ namespace Ice::Instrumentation
     public:
         virtual ~ObserverUpdater() = default;
 
-        /// Updates connection observers associated with each of the Ice connection from the communicator and its object
-        /// adapters.
+        /// Updates connection observers associated with each of the Ice connections from the communicator and its
+        /// object adapters.
         /// When called, this method goes through all the connections and for each connection
         /// CommunicatorObserver::getConnectionObserver is called. The implementation of getConnectionObserver
         /// has the possibility to return an updated observer if necessary.
         virtual void updateConnectionObservers() = 0;
 
-        /// Updates thread observers associated with each of the Ice thread from the communicator and its object
+        /// Updates thread observers associated with each of the Ice threads from the communicator and its object
         /// adapters. When called, this method goes through all the threads and for each thread
         /// CommunicatorObserver::getThreadObserver is called. The implementation of getThreadObserver has the
         /// possibility to return an updated observer if necessary.
@@ -240,6 +243,9 @@ namespace Ice::Instrumentation
     /// objects. This interface should be implemented by add-ins that wish to observe Ice objects in order to collect
     /// statistics. An instance of this interface can be provided to the Ice runtime through the Ice communicator
     /// initialization data.
+    /// @remark The Ice runtime calls this interface from contexts where exceptions cannot be handled, such as
+    /// `noexcept` functions. An implementation of this interface must not throw exceptions: a thrown exception can
+    /// terminate the process.
     /// @headerfile Ice/Ice.h
     class CommunicatorObserver
     {

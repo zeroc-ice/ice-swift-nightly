@@ -697,7 +697,7 @@ namespace
         }
         else
         {
-            // If subjectAlt is empty compare it to the subject CN, otherwise compare it to the to the subject alt
+            // If subjectAlt is empty compare it to the subject CN, otherwise compare it to the subject alt
             // name dnsNames.
             if (dnsNames.empty())
             {
@@ -813,11 +813,8 @@ Schannel::SSLEngine::~SSLEngine()
 void
 Schannel::SSLEngine::initialize()
 {
-    //
-    // BUGFIX: we use a global mutex for the initialization of Schannel to
-    // avoid crashes occurring with last Schannel updates see:
-    // https://github.com/zeroc-ice/ice/issues/242
-    //
+    // We use a global mutex for the initialization of Schannel to avoid crashes observed with some Schannel
+    // updates.
     lock_guard globalLock(globalMutex);
 
     Ice::SSL::SSLEngine::initialize();
@@ -1353,7 +1350,7 @@ Schannel::SSLEngine::createServerAuthenticationOptions() const
                     .cCreds = static_cast<DWORD>(_allCerts.size()),
                     .paCred = const_cast<PCCERT_CONTEXT*>(_allCerts.size() > 0 ? &_allCerts[0] : nullptr),
                     // Don't set SCH_SEND_ROOT_CERT as it seems to cause problems with Java certificate validation and
-                    // Schannel doesn't seems to send the root certificate either way.
+                    // Schannel doesn't seem to send the root certificate either way.
                     .dwFlags = SCH_CRED_NO_SYSTEM_MAPPER | SCH_USE_STRONG_CRYPTO};
             }
         },

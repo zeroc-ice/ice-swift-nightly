@@ -6,10 +6,15 @@
 #include "CollocatedRequestHandler.h"
 #include "ConnectionI.h"
 #include "Ice/InputStream.h"
+#include "Ice/LoggerUtil.h"
 #include "Ice/OutgoingAsync.h"
 #include "Ice/OutputStream.h"
 #include "Ice/Proxy.h"
+#include "Instance.h"
+#include "Reference.h"
 #include "ReferenceFactory.h"
+#include "RequestHandler.h"
+#include "ThreadPool.h"
 
 using namespace std;
 using namespace Ice;
@@ -77,7 +82,20 @@ namespace IceInternal
             : ProxyGetConnection(std::move(proxy)),
               LambdaInvoke(std::move(ex), std::move(sent))
         {
-            _response = [&, response = std::move(response)](bool) { response(getConnection()); };
+            _response = [this, response = std::move(response)](bool)
+            {
+                if (response)
+                {
+                    try
+                    {
+                        response(getConnection());
+                    }
+                    catch (...)
+                    {
+                        warning("response", std::current_exception());
+                    }
+                }
+            };
         }
     };
 
@@ -172,13 +190,14 @@ namespace IceInternal
             {
                 _response = [this, response = std::move(response)](bool ok)
                 {
-                    if (this->_is.b.empty())
+                    R v = this->_is.b.empty() ? R{ok, {}} : this->_read(ok, &this->_is);
+                    try
                     {
-                        response(R{ok, {}});
+                        response(std::move(v));
                     }
-                    else
+                    catch (...)
                     {
-                        response(this->_read(ok, &this->_is));
+                        this->warning("response", std::current_exception());
                     }
                 };
             }
@@ -282,6 +301,18 @@ ProxyGetConnection::ProxyGetConnection(ObjectPrx proxy) : ProxyOutgoingAsyncBase
 AsyncStatus
 ProxyGetConnection::invokeRemote(const ConnectionIPtr& connection, bool, bool)
 {
+    // A fixed proxy never reaches the invocation machinery: invoke returns its bound connection directly.
+    assert(!_proxy.ice_isFixed());
+    try
+    {
+        connection->throwException();
+    }
+    catch (const Ice::LocalException&)
+    {
+        // The connection is closed: throw RetryException so that the caller clears the cached request handler
+        // and calls invokeRemote again with a new connection.
+        throw RetryException(current_exception());
+    }
     _cachedConnection = connection;
     if (responseImpl(true, true))
     {
@@ -602,7 +633,15 @@ Ice::ObjectPrx::ice_invokeAsync(
 Ice::ConnectionPtr
 Ice::ObjectPrx::ice_getConnection() const
 {
-    return ice_getConnectionAsync().get();
+    // A fixed proxy is bound to a single connection: return this connection as is, whatever its state.
+    if (auto fixedReference = dynamic_pointer_cast<FixedReference>(_reference))
+    {
+        return fixedReference->fixedConnection();
+    }
+    else
+    {
+        return ice_getConnectionAsync().get();
+    }
 }
 
 std::function<void()>
@@ -611,18 +650,76 @@ Ice::ObjectPrx::ice_getConnectionAsync(
     std::function<void(std::exception_ptr)> ex,
     std::function<void(bool)> sent) const
 {
-    using LambdaOutgoing = ProxyGetConnectionLambda;
-    auto outAsync = std::make_shared<LambdaOutgoing>(*this, std::move(response), std::move(ex), std::move(sent));
-    _iceI_getConnection(outAsync);
-    return [outAsync]() { outAsync->cancel(); };
+    // A fixed proxy is bound to a single connection: return this connection as is, whatever its state. The response
+    // callback is executed from the thread pool that services this connection (or by the executor, if set). Like for
+    // the response callback of a lambda invocation, an exception thrown by the callback is logged as an
+    // Ice.Warn.AMICallback warning.
+    if (auto fixedReference = dynamic_pointer_cast<FixedReference>(_reference))
+    {
+        if (response)
+        {
+            InstancePtr instance = fixedReference->getInstance();
+            ConnectionIPtr connection = fixedReference->fixedConnection();
+            connection->getThreadPool()->execute(
+                [response = std::move(response), connection, instance = std::move(instance)]()
+                {
+                    try
+                    {
+                        response(connection);
+                    }
+                    catch (...)
+                    {
+                        if (instance->initializationData().properties->getIcePropertyAsInt("Ice.Warn.AMICallback") > 0)
+                        {
+                            Warning out(instance->initializationData().logger);
+                            try
+                            {
+                                throw;
+                            }
+                            catch (const Ice::Exception& e)
+                            {
+                                out << "Ice::Exception raised by response callback:\n" << e;
+                            }
+                            catch (const std::exception& e)
+                            {
+                                out << "std::exception raised by response callback:\n" << e.what();
+                            }
+                            catch (...)
+                            {
+                                out << "unknown exception raised by response callback";
+                            }
+                        }
+                    }
+                },
+                connection);
+        }
+        return [] {};
+    }
+    else
+    {
+        using LambdaOutgoing = ProxyGetConnectionLambda;
+        auto outAsync = std::make_shared<LambdaOutgoing>(*this, std::move(response), std::move(ex), std::move(sent));
+        _iceI_getConnection(outAsync);
+        return [outAsync]() { outAsync->cancel(); };
+    }
 }
 
 std::future<Ice::ConnectionPtr>
 Ice::ObjectPrx::ice_getConnectionAsync() const
 {
-    auto outAsync = std::make_shared<ProxyGetConnectionPromise>(*this);
-    _iceI_getConnection(outAsync);
-    return outAsync->getFuture();
+    // A fixed proxy is bound to a single connection: return this connection as is, whatever its state.
+    if (auto fixedReference = dynamic_pointer_cast<FixedReference>(_reference))
+    {
+        promise<Ice::ConnectionPtr> p;
+        p.set_value(fixedReference->fixedConnection());
+        return p.get_future();
+    }
+    else
+    {
+        auto outAsync = std::make_shared<ProxyGetConnectionPromise>(*this);
+        _iceI_getConnection(outAsync);
+        return outAsync->getFuture();
+    }
 }
 
 void

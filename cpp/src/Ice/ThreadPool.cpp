@@ -548,7 +548,7 @@ IceInternal::ThreadPool::run(const EventHandlerThreadPtr& thread)
                 {
                     //
                     // If the handler called ioCompleted(), we re-enable the handler in
-                    // case it was disabled and we decrease the number of thread in use.
+                    // case it was disabled and we decrease the number of threads in use.
                     //
                     if (_serialize && current._handler.get() != _workQueue.get())
                     {
@@ -799,7 +799,7 @@ IceInternal::ThreadPool::ioCompleted(ThreadPoolCurrent& current)
         }
     }
 
-    return _serialize && current._handler.get() != _workQueue.get();
+    return _sizeMax > 1 && _serialize && current._handler.get() != _workQueue.get();
 }
 
 #if defined(ICE_USE_IOCP)

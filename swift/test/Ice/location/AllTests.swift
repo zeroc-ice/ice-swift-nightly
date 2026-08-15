@@ -445,7 +445,7 @@ func allTests(_ helper: TestHelper) async throws {
                 try await Task.sleep(for: .milliseconds(10))
             }
         } catch is Ice.LocalException {
-            // Expected to fail once they endpoints have been updated in the background.
+            // Expected to fail once the endpoints have been updated in the background.
         }
 
         do {
@@ -454,7 +454,7 @@ func allTests(_ helper: TestHelper) async throws {
                 try await Task.sleep(for: .milliseconds(10))
             }
         } catch is Ice.LocalException {
-            // Expected to fail once they endpoints have been updated in the background.
+            // Expected to fail once the endpoints have been updated in the background.
         }
         ic.destroy()
     }
@@ -537,15 +537,16 @@ func allTests(_ helper: TestHelper) async throws {
         try await helloPrx.ice_ping()
         try test(false)
     } catch is Ice.NotRegisteredException {
-        // Calls on the well-known proxy are not collocated because of issue #507
+        // Calls on a well-known proxy are never collocated in Swift: collocation for well-known proxies relies
+        // on the C++ object adapter's active servant map, and Swift maintains its own.
     }
 
-    // Ensure that calls on the indirect proxy (with adapter ID) is collocated
+    // Ensure that calls on the indirect proxy (with adapter ID) are collocated
     var helloPrx = try await checkedCast(
         prx: adapter.createIndirectProxy(ident), type: HelloPrx.self)!
     try await test(helloPrx.ice_getConnection() == nil)
 
-    // Ensure that calls on the direct proxy is collocated
+    // Ensure that calls on the direct proxy are collocated
     helloPrx = try await checkedCast(prx: adapter.createDirectProxy(ident), type: HelloPrx.self)!
     try await test(helloPrx.ice_getConnection() == nil)
 

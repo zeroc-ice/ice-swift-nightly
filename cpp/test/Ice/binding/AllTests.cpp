@@ -60,9 +60,6 @@ allTests(Test::TestHelper* helper)
         com->deactivateObjectAdapter(adapter);
 
         const TestIntfPrx& test3(test1.value());
-        test(test3->ice_getConnection() == test1->ice_getConnection());
-        test(test3->ice_getConnection() == test2->ice_getConnection());
-
         try
         {
             test3->ice_ping();
@@ -887,7 +884,7 @@ allTests(Test::TestHelper* helper)
 
             // Ensure the published endpoints are actually valid. On
             // Fedora, binding to "localhost" with IPv6 only works but
-            // resolving localhost don't return the IPv6 address.
+            // resolving localhost doesn't return the IPv6 address.
             Ice::ObjectPrx prx = oa->createProxy(Ice::stringToIdentity("dummy"));
             try
             {

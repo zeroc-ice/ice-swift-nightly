@@ -2,7 +2,6 @@
 
 #include "StreamSocket.h"
 #include "Ice/LoggerUtil.h"
-#include "Ice/Properties.h"
 #include "IceBT/EndpointInfo.h"
 #include "Instance.h"
 #include "Util.h"
@@ -11,15 +10,21 @@ using namespace std;
 using namespace Ice;
 using namespace IceBT;
 
-IceBT::StreamSocket::StreamSocket(InstancePtr instance, SOCKET fd)
+IceBT::StreamSocket::StreamSocket(InstancePtr instance, SOCKET fd, const BTBufSize& bufSize)
     : IceInternal::NativeInfo(fd),
       _instance(std::move(instance))
 {
-    if (fd != INVALID_SOCKET)
-    {
-        init(fd);
-    }
+    assert(fd != INVALID_SOCKET);
+    IceInternal::setBlock(fd, false);
+    setBufferSize(fd, bufSize.rcvSize(), bufSize.sndSize());
     _desc = fdToString(fd);
+}
+
+IceBT::StreamSocket::StreamSocket(InstancePtr instance)
+    : IceInternal::NativeInfo(INVALID_SOCKET),
+      _instance(std::move(instance)),
+      _desc(fdToString(INVALID_SOCKET))
+{
 }
 
 IceBT::StreamSocket::~StreamSocket() { assert(_fd == INVALID_SOCKET); }
@@ -38,7 +43,7 @@ IceBT::StreamSocket::setBufferSize(SOCKET fd, int rcvSize, int sndSize)
         //
         IceInternal::setRecvBufferSize(fd, rcvSize);
         int size = IceInternal::getRecvBufferSize(fd);
-        if (size > 0 && size < rcvSize)
+        if (size < rcvSize)
         {
             //
             // Warn if the size that was set is less than the requested size and
@@ -63,7 +68,7 @@ IceBT::StreamSocket::setBufferSize(SOCKET fd, int rcvSize, int sndSize)
         //
         IceInternal::setSendBufferSize(fd, sndSize);
         int size = IceInternal::getSendBufferSize(fd);
-        if (size > 0 && size < sndSize)
+        if (size < sndSize)
         {
             // Warn if the size that was set is less than the requested size and
             // we have not already warned.
@@ -230,18 +235,25 @@ void
 IceBT::StreamSocket::setFd(SOCKET fd)
 {
     assert(fd != INVALID_SOCKET);
-    init(fd);
-    setNewFd(fd);
+    assert(_fd == INVALID_SOCKET);
+
+    // Record the fd only once the configuration succeeds.
+    try
+    {
+        BTBufSize bufSize{_instance->properties()};
+        IceInternal::setBlock(fd, false);
+        setBufferSize(fd, bufSize.rcvSize(), bufSize.sndSize());
+    }
+    catch (const Ice::SocketException&)
+    {
+        throw; // The failing call closed the fd.
+    }
+    catch (...)
+    {
+        // Nothing closed the fd: neither the property read nor the buffer-size warning check closes it.
+        IceInternal::closeSocketNoThrow(fd);
+        throw;
+    }
     _desc = fdToString(fd);
-}
-
-void
-IceBT::StreamSocket::init(SOCKET fd)
-{
-    IceInternal::setBlock(fd, false);
-
-    int32_t rcvSize = _instance->properties()->getIcePropertyAsInt("IceBT.RcvSize");
-    int32_t sndSize = _instance->properties()->getIcePropertyAsInt("IceBT.SndSize");
-
-    setBufferSize(fd, rcvSize, sndSize);
+    setNewFd(fd);
 }

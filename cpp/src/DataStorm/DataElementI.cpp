@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <set>
+#include <stdexcept>
 
 using namespace std;
 using namespace DataStormI;
@@ -53,7 +54,7 @@ DataElementI::DataElementI(TopicI* parent, string name, int64_t id, const DataSt
       _id(id),
       _config(make_shared<ElementConfig>()),
       _executor(parent->instance()->getCallbackExecutor()),
-      // The collocated forwarder is initalized here to avoid using a nullable proxy. The forwarder is only used by
+      // The collocated forwarder is initialized here to avoid using a nullable proxy. The forwarder is only used by
       // the instance that owns it and is removed in destroy implementation.
       _forwarder{parent->instance()->getCollocatedForwarder()->add<SessionPrx>(
           [this](const ByteSeq& inParams, const Current& current) { forward(inParams, current); })},
@@ -106,7 +107,22 @@ DataElementI::attach(
     shared_ptr<Filter> sampleFilter;
     if (auto info = data.config->sampleFilter)
     {
-        sampleFilter = _parent->getSampleFilterFactories()->decode(getCommunicator(), info->name, info->criteria);
+        try
+        {
+            sampleFilter = _parent->getSampleFilterFactories()->decode(getCommunicator(), info->name, info->criteria);
+        }
+        catch (const std::exception& ex)
+        {
+            // The sample filter factory runs the application's decoder. Leave this element unattached rather than
+            // attaching it without the filter, which would send the peer the samples its filter meant to exclude.
+            // The warning prints the element id: streaming the element itself would run the application's key
+            // formatter inside this very catch.
+            Warning out(_traceLevels->logger);
+            out << "did not attach 'e" << _id << "' to a peer element: its sample filter '" << info->name
+                << "' could not be decoded:\n"
+                << ex.what();
+            return;
+        }
     }
 
     string facet = data.config->facet.value_or(string{});
@@ -124,22 +140,22 @@ DataElementI::attach(
         name = os.str();
     }
 
-    // Attach the key or filter, and if attach success compute the ACK data to send to the peer.
+    // Attach the key or filter, and if the attach succeeds, compute the ACK data to send to the peer.
     if ((id > 0 &&
          attachKey(topicId, data.id, key, sampleFilter, session, std::move(prx), facet, id, name, priority)) ||
         (id < 0 &&
-         attachFilter(topicId, data.id, key, sampleFilter, session, std::move(prx), facet, id, filter, name, priority)))
+         attachFilter(topicId, data.id, key, sampleFilter, session, std::move(prx), facet, filter, name, priority)))
     {
         auto q = data.lastIds.find(_id);
         int64_t lastId = q != data.lastIds.end() ? q->second : 0;
         LongLongDict lastIds = key ? session->getLastIds(topicId, id, shared_from_this()) : LongLongDict{};
-        DataSamples samples = getSamples(key, sampleFilter, data.config, lastId, now);
+        DataSamples initializationBatch = getSamples(key, sampleFilter, data.config, lastId, now);
 
         acks.push_back(ElementDataAck{
             .id = _id,
             .config = _config,
             .lastIds = std::move(lastIds),
-            .samples = std::move(samples.samples),
+            .samples = std::move(initializationBatch.samples),
             .peerId = data.id});
     }
 }
@@ -154,13 +170,28 @@ DataElementI::attach(
     SessionPrx prx,
     const ElementDataAck& data,
     const chrono::time_point<chrono::system_clock>& now,
-    DataSamplesSeq& samples)
+    DataSamplesSeq& initializationBatches)
 {
     // Called with the topic and session from TopicI::attachElementsAck locked.
     shared_ptr<Filter> sampleFilter;
     if (auto info = data.config->sampleFilter)
     {
-        sampleFilter = _parent->getSampleFilterFactories()->decode(getCommunicator(), info->name, info->criteria);
+        try
+        {
+            sampleFilter = _parent->getSampleFilterFactories()->decode(getCommunicator(), info->name, info->criteria);
+        }
+        catch (const std::exception& ex)
+        {
+            // The sample filter factory runs the application's decoder. Leave this element unattached rather than
+            // attaching it without the filter, which would send the peer the samples its filter meant to exclude.
+            // The warning prints the element id: streaming the element itself would run the application's key
+            // formatter inside this very catch.
+            Warning out(_traceLevels->logger);
+            out << "did not attach 'e" << _id << "' to a peer element: its sample filter '" << info->name
+                << "' could not be decoded:\n"
+                << ex.what();
+            return nullptr;
+        }
     }
 
     string facet = data.config->facet.value_or(string{});
@@ -185,21 +216,28 @@ DataElementI::attach(
     if ((id > 0 &&
          attachKey(topicId, data.id, key, sampleFilter, session, std::move(prx), facet, id, name, priority)) ||
         (id < 0 &&
-         attachFilter(topicId, data.id, key, sampleFilter, session, std::move(prx), facet, id, filter, name, priority)))
+         attachFilter(topicId, data.id, key, sampleFilter, session, std::move(prx), facet, filter, name, priority)))
     {
         auto q = data.lastIds.find(_id);
         int64_t lastId = q != data.lastIds.end() ? q->second : 0;
-        samples.push_back(getSamples(key, sampleFilter, data.config, lastId, now));
+        DataSamples initializationBatch = getSamples(key, sampleFilter, data.config, lastId, now);
+        // Address the batch to the peer reader element so the receiver initializes exactly that reader. A multi-key
+        // writer produces one batch per key here; the session merges the batches sharing a writer-reader pair before
+        // sending them.
+        initializationBatch.peerId = data.id;
+        initializationBatches.push_back(std::move(initializationBatch));
     }
 
-    auto samplesI =
-        session->subscriberInitialized(topicId, id > 0 ? data.id : -data.id, data.samples, key, shared_from_this());
-    if (!samplesI.empty())
+    // The closure commits the subscriber state (initialized, lastId advanced past the acked samples) together with
+    // the sample delivery, or not at all.
+    return [=, self = shared_from_this()]()
     {
-        return [=, samplesI = std::move(samplesI), self = shared_from_this()]()
-        { self->initSamples(samplesI, topicId, data.id, priority, now, id < 0); };
-    }
-    return nullptr;
+        auto samplesI = session->subscriberInitialized(topicId, id > 0 ? data.id : -data.id, data.samples, key, self);
+        if (!samplesI.empty())
+        {
+            self->initSamples(samplesI, topicId, data.id, priority, now, id < 0);
+        }
+    };
 }
 
 bool
@@ -225,7 +263,7 @@ DataElementI::attachKey(
     }
 
     bool added = false;
-    auto subscriber = p->second.addOrGet(topicId, elementId, keyId, nullptr, sampleFilter, name, priority, added);
+    auto subscriber = p->second.addOrGet(topicId, elementId, nullptr, sampleFilter, name, priority, added);
 
     if (_onConnectedElements && added)
     {
@@ -235,6 +273,7 @@ DataElementI::attachKey(
 
     if (addConnectedKey(key, subscriber))
     {
+        subscriber->keyIds.emplace(key, keyId);
         if (key)
         {
             subscriber->keys.insert(key);
@@ -286,6 +325,21 @@ DataElementI::detachKey(
 
     if (removeConnectedKey(key, subscriber))
     {
+        // Unsubscribe from the key being detached, not from whichever key created the subscriber: a multi-key
+        // element attached to the same remote element shares a single subscriber across all its keys. attachKey
+        // records an id for every key it connects, and this runs only for a key that was connected, so the entry
+        // is there.
+        auto q = subscriber->keyIds.find(key);
+        assert(q != subscriber->keyIds.end());
+
+        // Should the lookup ever miss, 0 is an id no key ever uses (key ids start at 1), so the unsubscribe below
+        // is a no-op rather than a decrement of another key's count.
+        int64_t remoteKeyId = 0;
+        if (q != subscriber->keyIds.end())
+        {
+            remoteKeyId = q->second;
+            subscriber->keyIds.erase(q);
+        }
         if (key)
         {
             subscriber->keys.erase(key);
@@ -317,7 +371,7 @@ DataElementI::detachKey(
         _parent->decListenerCount();
         if (unsubscribe)
         {
-            session->unsubscribeFromKey(topicId, elementId, shared_from_this(), subscriber->id);
+            session->unsubscribeFromKey(topicId, elementId, shared_from_this(), remoteKeyId);
         }
         notifyListenerWaiters();
     }
@@ -332,7 +386,6 @@ DataElementI::attachFilter(
     const shared_ptr<SessionI>& session,
     SessionPrx prx,
     const string& facet,
-    int64_t subscriberId,
     const shared_ptr<Filter>& filter,
     const string& name,
     int priority)
@@ -351,7 +404,7 @@ DataElementI::attachFilter(
     const int64_t filterId = -elementId;
 
     bool added = false;
-    auto subscriber = p->second.addOrGet(topicId, filterId, subscriberId, filter, sampleFilter, name, priority, added);
+    auto subscriber = p->second.addOrGet(topicId, filterId, filter, sampleFilter, name, priority, added);
     if (_onConnectedElements && added)
     {
         _executor->queue([callback = _onConnectedElements, name]
@@ -665,7 +718,12 @@ DataElementI::disconnect()
             }
             else
             {
-                listener.first.session->disconnectFromKey(k.first, k.second, shared_from_this(), ks.second->id);
+                // One subscription per key: a multi-key element attached to the same remote element shares a
+                // single subscriber, and the session counts its subscriptions per remote key.
+                for (const auto& [_, remoteKeyId] : ks.second->keyIds)
+                {
+                    listener.first.session->disconnectFromKey(k.first, k.second, shared_from_this(), remoteKeyId);
+                }
             }
         }
     }
@@ -676,10 +734,10 @@ DataElementI::forward(const ByteSeq& inParams, const Current& current) const
 {
     for (const auto& [_, listener] : _listeners)
     {
-        // If we are forwarding a sample check if at least once of the listeners is interested in the sample.
+        // If we are forwarding a sample, check whether at least one of the listeners is interested in it.
         if (!_sample || listener.matchOne(_sample, false))
         {
-            // Forward the call using the listener's session proxy don't need to wait for the result.
+            // Forward the call using the listener's session proxy. We don't need to wait for the result.
             listener.proxy
                 ->ice_invokeAsync(current.operation, current.mode, inParams, nullptr, nullptr, nullptr, current.ctx);
         }
@@ -701,6 +759,15 @@ DataReaderI::DataReaderI(
     {
         _config->sampleFilter =
             FilterInfo{.name = std::move(sampleFilterName), .criteria = std::move(sampleFilterCriteria)};
+
+        // Sample filtering is evaluated on the writer, which groups the subscribers of a session by facet and
+        // forwards a sample to a facet as soon as one of its subscribers matches. A sample-filtered reader
+        // therefore needs a facet of its own, or it also receives the samples another reader's filter matched.
+        // Element ids restart at 1 in every topic and a node can hold several same-name topics, so the facet is
+        // qualified with the topic id, which the topic factory allocates per node.
+        ostringstream os;
+        os << "fa" << topic->getId() << '-' << _id;
+        _config->facet = os.str();
     }
 }
 
@@ -776,9 +843,26 @@ DataReaderI::initSamples(
     map<shared_ptr<Key>, shared_ptr<Sample>> previousByKey = _lastByKey;
     for (const auto& sample : samples)
     {
-        if (checkKey && !matchKey(sample->key))
+        if (checkKey)
         {
-            continue;
+            bool matched;
+            try
+            {
+                matched = matchKey(sample->key);
+            }
+            catch (const std::exception& ex)
+            {
+                // Checking an inline key calls the reader's key filter, which is application code. A filter that
+                // throws drops the sample, like a filter that returns false.
+                Warning out(_traceLevels->logger);
+                out << "dropped sample " << sample->id << ": the key filter failed:\n" << ex.what();
+                continue;
+            }
+
+            if (!matched)
+            {
+                continue;
+            }
         }
 
         // Apply discard policies:
@@ -791,8 +875,14 @@ DataReaderI::initSamples(
         {
             // The discard only affects the application-visible delivery: when the key has no base yet, still record
             // the discarded sample as the base partial updates resolve against, otherwise a later partial update on
-            // the key would have no base.
+            // the key would have no base. A remove carries no value and cannot serve as a base.
+            //
+            // Accepted trade-off (as in queue): a remove erases the key's base rather than leaving a tombstone, so a
+            // stale full update that loses the discard race can re-seed it here and let a following partial update
+            // resolve for a key last seen removed. This is strictly better than the pre-fix crash and a tombstone to
+            // distinguish the two states isn't worth it.
             if (sample->event != DataStorm::SampleEvent::PartialUpdate &&
+                sample->event != DataStorm::SampleEvent::Remove &&
                 previousByKey.find(sample->key) == previousByKey.end())
             {
                 try
@@ -818,11 +908,11 @@ DataReaderI::initSamples(
             if (sample->event == DataStorm::SampleEvent::PartialUpdate)
             {
                 auto p = previousByKey.find(sample->key);
-                if (p == previousByKey.end())
+                if (p == previousByKey.end() || !p->second->hasValue())
                 {
-                    // No base to resolve the partial update against (for example a peer writer that doesn't
-                    // bootstrap the base): drop the sample rather than apply the update to a default-constructed
-                    // value.
+                    // No usable base to resolve the partial update against (the key was never set, was removed, or
+                    // the base sample carries no value): drop the sample rather than apply the update to a
+                    // default-constructed value.
                     if (_traceLevels->data > 0)
                     {
                         Trace out(_traceLevels->logger, _traceLevels->dataCat);
@@ -847,8 +937,10 @@ DataReaderI::initSamples(
                     continue;
                 }
             }
-            else
+            else if (sample->event != DataStorm::SampleEvent::Remove)
             {
+                // A remove's value is irrelevant and is left default-constructed: skipping the decoding ensures a
+                // decoding failure cannot drop the remove and leave the key's stale base in place below.
                 try
                 {
                     sample->decode(_parent->instance()->getCommunicator());
@@ -862,7 +954,17 @@ DataReaderI::initSamples(
             }
         }
         valid.push_back(sample);
-        previousByKey[sample->key] = sample;
+
+        // A remove clears the per-key base: the key has no value anymore, so a later partial update for the key
+        // has no base to resolve against and is discarded.
+        if (sample->event == DataStorm::SampleEvent::Remove)
+        {
+            previousByKey.erase(sample->key);
+        }
+        else
+        {
+            previousByKey[sample->key] = sample;
+        }
     }
 
     if (_traceLevels->data > 2 && valid.size() < samples.size())
@@ -884,17 +986,15 @@ DataReaderI::initSamples(
             });
     }
 
+    // The per-key bases for partial updates are maintained even when the element keeps no history (sampleCount == 0),
+    // and even when every sample was discarded or dropped, so a later partial update on their keys can resolve.
+    _lastByKey = std::move(previousByKey);
+
     if (valid.empty())
     {
-        // Even when every sample was discarded or dropped, keep the bases recorded above so a later partial update
-        // on their keys can resolve.
-        _lastByKey = std::move(previousByKey);
         return;
     }
     _lastSendTime = valid.back()->timestamp;
-
-    // The per-key bases for partial updates are maintained even when the element keeps no history (sampleCount == 0).
-    _lastByKey = std::move(previousByKey);
 
     if (_config->sampleLifetime && *_config->sampleLifetime > 0)
     {
@@ -952,7 +1052,10 @@ DataReaderI::queue(
     const chrono::time_point<chrono::system_clock>& now,
     bool checkKey)
 {
-    if (_config->facet && *_config->facet != facet)
+    // The writer forwards a sample once per destination facet, and this reader is attached to exactly one of them:
+    // the facet it configured for its sample filter, or the unfaceted destination when it has no sample filter.
+    // Accept only the copy addressed to this reader's destination.
+    if (_config->facet ? *_config->facet != facet : !facet.empty())
     {
         if (_traceLevels->data > 2)
         {
@@ -961,14 +1064,33 @@ DataReaderI::queue(
         }
         return;
     }
-    else if (checkKey && !matchKey(sample->key))
+    else if (checkKey)
     {
-        if (_traceLevels->data > 2)
+        bool matched;
+        try
         {
-            Trace out(_traceLevels->logger, _traceLevels->dataCat);
-            out << this << ": skipped sample " << sample->id << " (key doesn't match)";
+            matched = matchKey(sample->key);
         }
-        return;
+        catch (const std::exception& ex)
+        {
+            // Checking an inline key calls the reader's key filter, which is application code. A filter that throws
+            // drops the sample for this reader, like a filter that returns false. The session queues the sample with
+            // each reader subscribed to the writer element in turn, so letting the exception escape would also drop
+            // the sample for the readers queued after this one.
+            Warning out(_traceLevels->logger);
+            out << "dropped sample " << sample->id << ": the key filter failed:\n" << ex.what();
+            return;
+        }
+
+        if (!matched)
+        {
+            if (_traceLevels->data > 2)
+            {
+                Trace out(_traceLevels->logger, _traceLevels->dataCat);
+                out << this << ": skipped sample " << sample->id << " (key doesn't match)";
+            }
+            return;
+        }
     }
 
     if (_traceLevels->data > 2)
@@ -992,8 +1114,14 @@ DataReaderI::queue(
 
         // The discard only affects the application-visible delivery: when the key has no base yet, still record the
         // discarded sample as the base partial updates resolve against, otherwise a later partial update on the key
-        // would have no base.
-        if (sample->event != DataStorm::SampleEvent::PartialUpdate && _lastByKey.find(sample->key) == _lastByKey.end())
+        // would have no base. A remove carries no value and cannot serve as a base.
+        //
+        // Accepted trade-off: a remove erases the key's base rather than leaving a tombstone, so this cannot tell
+        // "removed" from "never seen". A stale full update that loses the discard race can re-seed the base here and
+        // let a following partial update resolve for a key the application last saw removed. This is strictly better
+        // than the pre-fix crash; distinguishing the two states would need a remove tombstone and isn't worth it.
+        if (sample->event != DataStorm::SampleEvent::PartialUpdate && sample->event != DataStorm::SampleEvent::Remove &&
+            _lastByKey.find(sample->key) == _lastByKey.end())
         {
             try
             {
@@ -1016,10 +1144,11 @@ DataReaderI::queue(
         if (sample->event == DataStorm::SampleEvent::PartialUpdate)
         {
             auto p = _lastByKey.find(sample->key);
-            if (p == _lastByKey.end())
+            if (p == _lastByKey.end() || !p->second->hasValue())
             {
-                // No base to resolve the partial update against (for example a peer writer that doesn't bootstrap
-                // the base): drop the sample rather than apply the update to a default-constructed value.
+                // No usable base to resolve the partial update against (the key was never set, was removed, or the
+                // base sample carries no value): drop the sample rather than apply the update to a
+                // default-constructed value.
                 if (_traceLevels->data > 0)
                 {
                     Trace out(_traceLevels->logger, _traceLevels->dataCat);
@@ -1041,8 +1170,10 @@ DataReaderI::queue(
                 return;
             }
         }
-        else
+        else if (sample->event != DataStorm::SampleEvent::Remove)
         {
+            // A remove's value is irrelevant and is left default-constructed: skipping the decoding ensures a
+            // decoding failure cannot drop the remove and leave the key's stale base in place below.
             try
             {
                 sample->decode(_parent->instance()->getCommunicator());
@@ -1058,7 +1189,16 @@ DataReaderI::queue(
     _lastSendTime = sample->timestamp;
 
     // The per-key base for partial updates is maintained even when the element keeps no history (sampleCount == 0).
-    _lastByKey[sample->key] = sample;
+    // A remove clears the base: the key has no value anymore, so a later partial update for the key has no base to
+    // resolve against and is discarded.
+    if (sample->event == DataStorm::SampleEvent::Remove)
+    {
+        _lastByKey.erase(sample->key);
+    }
+    else
+    {
+        _lastByKey[sample->key] = sample;
+    }
 
     if (_onSamples)
     {
@@ -1175,8 +1315,18 @@ DataWriterI::publish(const shared_ptr<Key>& key, const shared_ptr<Sample>& sampl
     {
         assert(!sample->hasValue());
         auto p = _lastByKey.find(key);
-        _parent->getUpdater(
-            sample->tag)(p == _lastByKey.end() ? nullptr : p->second, sample, _parent->instance()->getCommunicator());
+        if (p == _lastByKey.end() || !p->second->hasValue())
+        {
+            // No base to resolve the partial update against: the key was never given a full value, or its last
+            // value was removed. On the writer this is always an application sequencing error, because _lastByKey
+            // holds only this writer's own published samples, so no other writer's remove can clear it (unlike the
+            // reader, where a concurrent remove can legitimately leave the key with no base). Throw so the mistake
+            // surfaces at the partialUpdate call site instead of being silently dropped. The value-less check
+            // mirrors the reader's guards: a remove erases the base rather than storing a value-less one, so it
+            // can't fire here today, but both sides consume _lastByKey with identical semantics.
+            throw std::logic_error("cannot apply a partial update to a key that has no value");
+        }
+        _parent->getUpdater(sample->tag)(p->second, sample, _parent->instance()->getCommunicator());
     }
 
     sample->id = ++_parent->_nextSampleId;
@@ -1190,7 +1340,16 @@ DataWriterI::publish(const shared_ptr<Key>& key, const shared_ptr<Sample>& sampl
     send(key, sample);
 
     // The per-key base for partial updates is maintained even when the element keeps no history (sampleCount == 0).
-    _lastByKey[key] = sample;
+    // A remove clears the base: the key has no value anymore, so a later partial update for the key has no base to
+    // resolve against and is discarded.
+    if (sample->event == DataStorm::SampleEvent::Remove)
+    {
+        _lastByKey.erase(key);
+    }
+    else
+    {
+        _lastByKey[key] = sample;
+    }
 
     if (_config->sampleLifetime && *_config->sampleLifetime > 0)
     {
@@ -1240,14 +1399,6 @@ KeyDataReaderI::KeyDataReaderI(
     {
         Trace out(_traceLevels->logger, _traceLevels->dataCat);
         out << this << ": created key reader";
-    }
-
-    // If sample filtering is enabled, ensure the updates are received using a session facet specific to this reader.
-    if (_config->sampleFilter)
-    {
-        ostringstream os;
-        os << "fa" << _id;
-        _config->facet = os.str();
     }
 }
 
@@ -1403,8 +1554,8 @@ KeyDataWriterI::getSamples(
     const chrono::time_point<chrono::system_clock>& now)
 {
     // Collect all queued samples that match the key and sample filter, are newer than the lastId, and are not stale.
-    DataSamples samples;
-    samples.id = _keys.empty() ? -_id : _id;
+    DataSamples initializationBatch;
+    initializationBatch.id = _keys.empty() ? -_id : _id;
 
     // Orders the source samples to deliver by id, caps them to the reader's history depth, and delivers them. A
     // partial base is sent as a full Update, and the earliest delivered sample of each key is likewise resolved to a
@@ -1462,16 +1613,16 @@ KeyDataWriterI::getSamples(
         set<shared_ptr<Key>> seen;
         for (const auto& sample : sources)
         {
-            DataSample ds = toSample(sample, getCommunicator(), _keys.empty());
+            DataSample initializationSample = toSample(sample, getCommunicator(), _keys.empty());
             // The earliest delivered sample of each key must carry a full value; a partial is sent as a full Update
             // built from the sample's own resolved value.
             if (seen.insert(sample->key).second && sample->event == DataStorm::SampleEvent::PartialUpdate)
             {
-                ds.tag = 0;
-                ds.event = DataStorm::SampleEvent::Update;
-                ds.value = sample->encodeValue(getCommunicator());
+                initializationSample.tag = 0;
+                initializationSample.event = DataStorm::SampleEvent::Update;
+                initializationSample.value = sample->encodeValue(getCommunicator());
             }
-            samples.samples.push_back(std::move(ds));
+            initializationBatch.samples.push_back(std::move(initializationSample));
         }
     };
 
@@ -1498,7 +1649,7 @@ KeyDataWriterI::getSamples(
     if (config->sampleCount && *config->sampleCount == 0)
     {
         finalize(collectBases({}));
-        return samples;
+        return initializationBatch;
     }
 
     // Reap stale samples before collecting any samples.
@@ -1507,7 +1658,7 @@ KeyDataWriterI::getSamples(
         cleanOldSamples(_samples, now, *_config->sampleLifetime);
     }
 
-    // Compute the stale time, according to the callers sample lifetime configuration.
+    // Compute the stale time, according to the caller's sample lifetime configuration.
     chrono::time_point<chrono::system_clock> staleTime = chrono::time_point<chrono::system_clock>::min();
     if (config->sampleLifetime && *config->sampleLifetime > 0)
     {
@@ -1562,7 +1713,7 @@ KeyDataWriterI::getSamples(
     auto bases = collectBases(covered);
     sources.insert(sources.end(), bases.begin(), bases.end());
     finalize(std::move(sources));
-    return samples;
+    return initializationBatch;
 }
 
 void
@@ -1585,7 +1736,7 @@ KeyDataWriterI::forward(const ByteSeq& inParams, const Current& current) const
         // and an unmatched key's sample would be wasted bandwidth at best (the receiver never subscribed its id).
         if (!_sample || listener.matchOne(_sample, true))
         {
-            // Forward the call using the listener's session proxy, don't need to wait for the result.
+            // Forward the call using the listener's session proxy. We don't need to wait for the result.
             listener.proxy
                 ->ice_invokeAsync(current.operation, current.mode, inParams, nullptr, nullptr, nullptr, current.ctx);
         }
@@ -1607,14 +1758,6 @@ FilteredDataReaderI::FilteredDataReaderI(
     {
         Trace out(_traceLevels->logger, _traceLevels->dataCat);
         out << this << ": created filtered reader";
-    }
-
-    // If sample filtering is enabled, ensure the updates are received using a session facet specific to this reader.
-    if (_config->sampleFilter)
-    {
-        ostringstream os;
-        os << "fa" << _id;
-        _config->facet = os.str();
     }
 }
 

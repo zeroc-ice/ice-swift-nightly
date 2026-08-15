@@ -22,6 +22,84 @@ public:
     void run(int, char**) override;
 };
 
+// A value type with a custom encoding whose default value (0) encodes to zero bytes. The default Ice encoding never
+// produces an empty byte sequence, so only a custom Encoder can, and such a full value must remain a usable
+// partial-update base.
+struct Counter
+{
+    int value = 0;
+};
+
+// An update tag type whose Decoder rejects one of the tag values. A writer sends its whole set of update tags to a
+// reader when they attach, so an undecodable tag arrives together with the tags the reader can decode.
+struct Op
+{
+    std::string name;
+
+    bool operator<(const Op& other) const { return name < other.name; }
+    bool operator==(const Op& other) const { return name == other.name; }
+};
+
+namespace DataStorm
+{
+    template<> struct Encoder<Op>
+    {
+        static Ice::ByteSeq encode(const Ice::CommunicatorPtr&, const Op& tag)
+        {
+            Ice::ByteSeq bytes;
+            bytes.reserve(tag.name.size());
+            for (char c : tag.name)
+            {
+                bytes.push_back(static_cast<std::byte>(c));
+            }
+            return bytes;
+        }
+    };
+
+    template<> struct Decoder<Op>
+    {
+        static Op decode(const Ice::CommunicatorPtr&, const Ice::ByteSeq& data)
+        {
+            std::string name;
+            name.reserve(data.size());
+            for (std::byte b : data)
+            {
+                name += static_cast<char>(b);
+            }
+            if (name == "undecodable")
+            {
+                throw std::runtime_error("undecodable update tag");
+            }
+            return Op{name};
+        }
+    };
+
+    template<> struct Encoder<Counter>
+    {
+        static Ice::ByteSeq encode(const Ice::CommunicatorPtr&, const Counter& value)
+        {
+            // The default value encodes to zero bytes; any other value encodes to a single byte.
+            if (value.value == 0)
+            {
+                return {};
+            }
+            return {static_cast<std::byte>(value.value)};
+        }
+    };
+
+    template<> struct Decoder<Counter>
+    {
+        static Counter decode(const Ice::CommunicatorPtr&, const Ice::ByteSeq& data)
+        {
+            if (!data.empty() && data[0] == std::byte{0xFF})
+            {
+                throw std::runtime_error("undecodable counter");
+            }
+            return Counter{data.empty() ? 0 : static_cast<int>(data[0])};
+        }
+    };
+}
+
 void ::Writer::run(int argc, char* argv[])
 {
     Node node(argc, argv);
@@ -34,6 +112,15 @@ void ::Writer::run(int argc, char* argv[])
     topic.setWriterDefaultConfig(config);
 
     topic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+
+    // This writer is created here, ahead of the reader topic of the same name, so that the reader attaches to a
+    // writer topic that already holds both update tags: the tags then reach the reader in the topic spec it attaches
+    // to, rather than in a later attachTags call. It publishes at the end of the test.
+    Topic<string, Counter, Op> tagDecodeErrorTopic(node, "tagDecodeErrorTopic");
+    tagDecodeErrorTopic.setWriterDefaultConfig(config);
+    tagDecodeErrorTopic.setUpdater<int>(Op{"undecodable"}, [](Counter& counter, int delta) { counter.value += delta; });
+    tagDecodeErrorTopic.setUpdater<int>(Op{"increment"}, [](Counter& counter, int delta) { counter.value += delta; });
+    auto tagDecodeErrorWriter = makeSingleKeyWriter(tagDecodeErrorTopic, "key");
 
     cout << "testing partial update... " << flush;
     {
@@ -63,9 +150,9 @@ void ::Writer::run(int argc, char* argv[])
     }
     cout << "ok" << endl;
 
-    // Destroying a multi-key writer leaves a stale entry in the reader's per-key subscriber map
-    // (DataElementI::detachKey detaches every key with the element's first key id). A later attach then drives
-    // SessionI::getLastIds over the stale entry, which must not crash the reader.
+    // A multi-key writer that is destroyed and replaced by a new one keeps delivering to a reader subscribed to
+    // both keys: the detach releases the subscription for each of the writer's keys, so the reattach starts from
+    // a clean per-key state.
     Topic<string, int> detachTopic(node, "multiKeyDetach");
     detachTopic.setWriterDefaultConfig(config);
     Topic<string, int> detachBarrier(node, "multiKeyDetachBarrier");
@@ -75,10 +162,10 @@ void ::Writer::run(int argc, char* argv[])
             auto writer = makeMultiKeyWriter(detachTopic, {"k1", "k2"});
             writer.waitForReaders();
             writer.add("k1", 1);
-        } // writer destroyed here -> detachElements -> stale per-key entry on the reader
+        } // writer destroyed here, detaching both of its keys on the reader
 
         // Wait for the reader to confirm it has processed the detach before creating the second writer, so the
-        // second attach is guaranteed to run getLastIds over the stale entry.
+        // second attach runs against the state the detach left behind.
         [[maybe_unused]] auto _ = makeSingleKeyReader(detachBarrier, "barrier").getNextUnread();
 
         auto writer = makeMultiKeyWriter(detachTopic, {"k1", "k2"});
@@ -264,6 +351,173 @@ void ::Writer::run(int argc, char* argv[])
         // The reader only consumes initialization samples, so it can attach and detach before this thread runs
         // again: waiting on the reader count would race. Wait until the reader verified its samples instead.
         [[maybe_unused]] auto _ = makeSingleKeyReader(throwBarrier, "done").getNextUnread();
+    }
+    cout << "ok" << endl;
+
+    // A partial update requires the key to have a current value: after a remove, publishing a partial update is an
+    // application error that throws logic_error and publishes nothing; the next full value makes the key updatable
+    // again.
+    Topic<string, StockPtr> removeTopic(node, "removeTopic");
+    removeTopic.setWriterDefaultConfig(config);
+    removeTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    cout << "testing partial update after remove... " << flush;
+    {
+        auto writer = makeSingleKeyWriter(removeTopic, "AAPL");
+        writer.waitForReaders();
+        writer.add(make_shared<Stock>(12.0f, 13.0f, 14.0f));
+        writer.remove();
+        try
+        {
+            writer.partialUpdate<float>("price")(15.0f);
+            test(false);
+        }
+        catch (const std::logic_error&)
+        {
+        }
+        test(writer.getLast().getEvent() == SampleEvent::Remove); // the rejected update was not published
+        writer.update(make_shared<Stock>(20.0f, 21.0f, 22.0f));
+        writer.waitForNoReaders();
+    }
+    cout << "ok" << endl;
+
+    // Two writers publish the same key: writer 2's partial update reaches the reader after writer 1's remove
+    // cleared the key's value. The reader discards the partial update and resynchronizes on writer 2's next full
+    // value. Both writers deliver through the node's single session connection and the reader node dispatches
+    // samples serialized, so the reader is guaranteed to process the remove before the partial update.
+    Topic<string, StockPtr> twoWritersTopic(node, "twoWritersTopic");
+    twoWritersTopic.setWriterDefaultConfig(config);
+    twoWritersTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    cout << "testing partial update after another writer's remove... " << flush;
+    {
+        auto writer1 = makeSingleKeyWriter(twoWritersTopic, "AAPL", "writer1");
+        auto writer2 = makeSingleKeyWriter(twoWritersTopic, "AAPL", "writer2");
+        writer1.waitForReaders();
+        writer2.waitForReaders();
+        writer1.add(make_shared<Stock>(12.0f, 13.0f, 14.0f));
+        writer2.add(make_shared<Stock>(100.0f, 101.0f, 102.0f));
+        writer1.remove();
+        // Writer 2 resolves the partial update against its own value and publishes it, but the reader no longer
+        // has a value for the key.
+        writer2.partialUpdate<float>("price")(55.0f);
+        test(writer2.getLast().getEvent() == SampleEvent::PartialUpdate);
+        test(writer2.getLast().getValue()->price == 55.0f);
+        writer2.update(make_shared<Stock>(200.0f, 201.0f, 202.0f));
+        writer1.waitForNoReaders();
+        writer2.waitForNoReaders();
+    }
+    cout << "ok" << endl;
+
+    // A reader that joins late initializes across a remove: the writer's history holds an add, a remove, a re-add,
+    // and a partial update, all delivered as initialization samples. The remove clears the key's base within the
+    // init batch, the re-add re-establishes it, and the trailing partial update resolves against the re-added value.
+    Topic<string, StockPtr> initRemoveTopic(node, "initRemoveTopic");
+    initRemoveTopic.setWriterDefaultConfig(config); // keep full history so the reader initializes from all four samples
+    initRemoveTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    Topic<string, int> initRemoveBarrier(node, "initRemoveBarrier");
+    cout << "testing partial update to a late joiner across a remove... " << flush;
+    {
+        auto writer = makeSingleKeyWriter(initRemoveTopic, "AAPL");
+        writer.add(make_shared<Stock>(12.0f, 13.0f, 14.0f));
+        writer.remove();
+        writer.add(make_shared<Stock>(20.0f, 21.0f, 22.0f));
+        writer.partialUpdate<float>("price")(25.0f); // resolves against the re-added value
+
+        // Let the reader attach as a late joiner, after all four samples are in history.
+        auto barrier = makeSingleKeyWriter(initRemoveBarrier, "barrier");
+        barrier.waitForReaders();
+        barrier.update(0);
+
+        // The reader only consumes initialization samples, so wait until it verified them rather than on the reader
+        // count, which would race with its attach/detach.
+        [[maybe_unused]] auto _ = makeSingleKeyReader(initRemoveBarrier, "done").getNextUnread();
+    }
+    cout << "ok" << endl;
+
+    // A null class value is a valid base value. With no updater registered, the no-op updater resolves the partial
+    // update by carrying the previous value over: it clones the null base to null instead of dereferencing it.
+    Topic<string, StockPtr> nullValueTopic(node, "nullValueTopic");
+    nullValueTopic.setWriterDefaultConfig(config);
+    // Intentionally no updater registered, so the no-op updater resolves the partial update.
+    cout << "testing partial update against a null class value... " << flush;
+    {
+        auto writer = makeSingleKeyWriter(nullValueTopic, "AAPL");
+        writer.add(nullptr); // a legitimate null class value establishes the base
+        writer.partialUpdate<float>("price")(15.0f);
+        test(writer.getLast().getEvent() == SampleEvent::PartialUpdate);
+        test(writer.getLast().getValue() == nullptr); // the null base was cloned to null, not dereferenced
+    }
+    cout << "ok" << endl;
+
+    // A full value whose custom encoding is empty (here Counter's default value) is still a usable partial-update
+    // base. The reader must decode the empty encoding into a value-bearing sample rather than treat it as value-less
+    // and discard the following partial update for want of a base.
+    Topic<string, Counter> emptyEncodedTopic(node, "emptyEncodedTopic");
+    emptyEncodedTopic.setWriterDefaultConfig(config);
+    emptyEncodedTopic.setUpdater<int>("increment", [](Counter& counter, int delta) { counter.value += delta; });
+    cout << "testing partial update against an empty-encoded full value... " << flush;
+    {
+        auto writer = makeSingleKeyWriter(emptyEncodedTopic, "key");
+        writer.waitForReaders();
+        writer.add(Counter{0}); // the full value 0 encodes to zero bytes
+        writer.partialUpdate<int>("increment")(5);
+        writer.waitForNoReaders();
+    }
+    cout << "ok" << endl;
+
+    // Two readers of the same key on one node hold different values for it: the reader without a discard policy
+    // accepts the low-priority writer's full value, the reader using the priority discard policy discards it and keeps
+    // the high-priority writer's value. The partial update published next must be resolved against each reader's own
+    // value. Both writers deliver through the node's single session connection and the reader node dispatches samples
+    // serialized, so the reader processes the three samples in the order they are published here.
+    Topic<string, StockPtr> perReaderTopic(node, "perReaderTopic");
+    perReaderTopic.setWriterDefaultConfig(config);
+    perReaderTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    cout << "testing partial update resolved against each reader's own value... " << flush;
+    {
+        WriterConfig highPriority = config;
+        highPriority.priority = 10;
+        auto high = makeSingleKeyWriter(perReaderTopic, "AAPL", "high", highPriority);
+
+        WriterConfig lowPriority = config;
+        lowPriority.priority = 1;
+        auto low = makeSingleKeyWriter(perReaderTopic, "AAPL", "low", lowPriority);
+
+        high.waitForReaders(2);
+        low.waitForReaders(2);
+
+        high.add(make_shared<Stock>(12.0f, 13.0f, 14.0f));      // accepted by both readers
+        low.update(make_shared<Stock>(100.0f, 101.0f, 102.0f)); // discarded by the priority reader
+        high.partialUpdate<float>("price")(15.0f);
+
+        high.waitForNoReaders();
+        low.waitForNoReaders();
+    }
+    cout << "ok" << endl;
+
+    // A full value that the reader's Decoder rejects is dropped by every reader of the key on the node, and none of
+    // them keeps it as the key's value: they all carry on with the value they had and resynchronize on the next full
+    // value that decodes.
+    Topic<string, Counter> decodeErrorTopic(node, "decodeErrorTopic");
+    decodeErrorTopic.setWriterDefaultConfig(config);
+    cout << "testing full value that fails to decode... " << flush;
+    {
+        auto writer = makeSingleKeyWriter(decodeErrorTopic, "key");
+        writer.waitForReaders(2);
+        writer.add(Counter{1});
+        writer.update(Counter{0xFF}); // the reader's Decoder throws on this value
+        writer.update(Counter{2});
+        writer.waitForNoReaders();
+    }
+    cout << "ok" << endl;
+
+    // The writer sends both of its update tags when the reader attaches, and the reader's Decoder rejects one of
+    // them. The partial update published with the tag the reader can decode is still applied.
+    cout << "testing update tag that fails to decode... " << flush;
+    {
+        tagDecodeErrorWriter.waitForReaders();
+        tagDecodeErrorWriter.add(Counter{1});
+        tagDecodeErrorWriter.partialUpdate<int>(Op{"increment"})(5);
+        tagDecodeErrorWriter.waitForNoReaders();
     }
     cout << "ok" << endl;
 }

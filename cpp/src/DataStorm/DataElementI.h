@@ -30,23 +30,23 @@ namespace DataStormI
         struct Subscriber
         {
             Subscriber(
-                std::int64_t id,
                 const std::shared_ptr<Filter>& filter,
                 const std::shared_ptr<Filter>& sampleFilter,
                 std::string name,
                 int priority)
-                : id(id),
-                  filter(filter),
+                : filter(filter),
                   sampleFilter(sampleFilter),
                   name(std::move(name)),
                   priority(priority)
             {
             }
 
-            std::int64_t topicId;
-            std::int64_t elementId;
-            std::int64_t id;
             std::set<std::shared_ptr<Key>> keys;
+            // The remote key id each key in `keys` was attached with. A local element attached to the same remote
+            // element under several keys shares a single Subscriber, so the ids are tracked per key: detaching one
+            // key with another key's id corrupts the session's per-key subscriber accounting. Empty for a filter
+            // subscription, which has no remote key id.
+            std::map<std::shared_ptr<Key>, std::int64_t> keyIds;
             std::shared_ptr<Filter> filter;
             std::shared_ptr<Filter> sampleFilter;
             std::string name;
@@ -106,7 +106,6 @@ namespace DataStormI
             [[nodiscard]] std::shared_ptr<Subscriber> addOrGet(
                 std::int64_t topicId,
                 std::int64_t elementId,
-                std::int64_t subscriberId,
                 const std::shared_ptr<Filter>& filter,
                 const std::shared_ptr<Filter>& sampleFilter,
                 const std::string& name,
@@ -118,10 +117,7 @@ namespace DataStormI
                 if (p == subscribers.end())
                 {
                     added = true;
-                    p = subscribers
-                            .emplace(
-                                k,
-                                std::make_shared<Subscriber>(subscriberId, filter, sampleFilter, name, priority))
+                    p = subscribers.emplace(k, std::make_shared<Subscriber>(filter, sampleFilter, name, priority))
                             .first;
                 }
                 return p->second;
@@ -193,12 +189,12 @@ namespace DataStormI
         /// @param data The acknowledgment data associated with the remote element, describing its configuration or
         /// state.
         /// @param now The timestamp indicating when the attachment was requested.
-        /// @param samples Output parameter filled with the data samples in the publisher's queue. This parameter is
-        /// always empty when the method is called on the subscriber side.
-        /// @return A function that initializes the reader with the prepared samples:
-        /// - For a publisher, this method always returns a `nullptr` function.
-        /// - For a subscriber, this method returns a function that initializes the reader with samples provided by the
-        /// peer.
+        /// @param initializationBatches Output parameter filled with the initialization batches built from the
+        /// publisher's queued samples. This parameter is always empty when the method is called on the subscriber side.
+        /// @return A function that commits the subscriber's initialization state for the attached element and delivers
+        /// the samples provided by the peer, if any. The caller runs it only once every element in the acknowledgment
+        /// has attached. Returns `nullptr` when the element was left unattached because its sample filter could not be
+        /// decoded.
         [[nodiscard]] std::function<void()> attach(
             std::int64_t topicId,
             std::int64_t id,
@@ -208,7 +204,7 @@ namespace DataStormI
             DataStormContract::SessionPrx prx,
             const DataStormContract::ElementDataAck& data,
             const std::chrono::time_point<std::chrono::system_clock>& now,
-            DataStormContract::DataSamplesSeq& samples);
+            DataStormContract::DataSamplesSeq& initializationBatches);
 
         [[nodiscard]] bool attachKey(
             std::int64_t,
@@ -238,7 +234,6 @@ namespace DataStormI
             const std::shared_ptr<SessionI>&,
             DataStormContract::SessionPrx,
             const std::string&,
-            std::int64_t,
             const std::shared_ptr<Filter>&,
             const std::string&,
             int);
@@ -296,7 +291,7 @@ namespace DataStormI
         void waitForListeners(int count) const;
         [[nodiscard]] bool hasListeners() const;
 
-        [[nodiscard]] TopicI* getTopic() const { return _parent.get(); }
+        [[nodiscard]] const std::shared_ptr<TopicI>& getTopic() const { return _parent; }
 
     protected:
         virtual bool addConnectedKey(const std::shared_ptr<Key>& key, const std::shared_ptr<Subscriber>& subscriber);

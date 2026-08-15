@@ -5,6 +5,7 @@
 
 #include "../Ice/Acceptor.h"
 #include "../Ice/TransceiverF.h"
+#include "BTBufSize.h"
 #include "Config.h"
 #include "EngineF.h"
 #include "InstanceF.h"
@@ -42,9 +43,11 @@ namespace IceBT
         const std::string _uuid;
         const std::string _name;
         const int _channel;
+        const BTBufSize _bufSize;
         std::string _path;
 
         std::mutex _mutex;
+        bool _closed{false};
         std::stack<IceInternal::TransceiverPtr> _transceivers;
     };
 }

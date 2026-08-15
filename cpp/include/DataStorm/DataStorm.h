@@ -10,6 +10,7 @@
 #include "Node.h"
 #include "Types.h"
 
+#include <cassert>
 #include <regex>
 
 #if defined(__clang__)
@@ -234,7 +235,7 @@ namespace DataStorm
         [[nodiscard]] bool hasReaders() const noexcept;
 
         /// Waits for the given number of readers to be online.
-        /// @param count The number of readers to wait.
+        /// @param count The number of readers to wait for.
         /// @throws NodeShutdownException Thrown when the node is shut down while waiting.
         void waitForReaders(unsigned int count = 1) const;
 
@@ -355,7 +356,7 @@ namespace DataStorm
         /// @throws NodeShutdownException Thrown when the node is shut down while waiting.
         void waitForNoWriters() const;
 
-        /// Sets the default configuration used to construct readers.
+        /// Sets the default configuration used to construct writers.
         /// @param config The default writer configuration.
         void setWriterDefaultConfig(const WriterConfig& config) noexcept;
 
@@ -364,7 +365,7 @@ namespace DataStorm
         [[nodiscard]] bool hasReaders() const noexcept;
 
         /// Waits for the given number of data readers to be online.
-        /// @param count The number of data readers to wait.
+        /// @param count The number of data readers to wait for.
         /// @throws NodeShutdownException Thrown when the node is shut down while waiting.
         void waitForReaders(unsigned int count = 1) const;
 
@@ -388,8 +389,9 @@ namespace DataStorm
 
         /// Sets a key filter factory. The given factory function must return a filter function that returns `true` if
         /// the key matches the filter criteria, `false` otherwise.
-        /// Register all key filters before creating any reader or writer for this topic: the set of filters is not
-        /// synchronized, so modifying it once the topic is in use races with the Ice threads that use the topic.
+        /// Register all key filter factories before creating any reader or writer for this topic: the set of
+        /// factories is not synchronized, so modifying it once the topic is in use races with the Ice threads that
+        /// use the topic.
         /// @param name The name of the key filter.
         /// @param factory The filter factory function.
         template<typename Criteria>
@@ -399,8 +401,15 @@ namespace DataStorm
 
         /// Sets a sample filter factory. The given factory function must return a filter function that returns `true`
         /// if the sample matches the filter criteria, `false` otherwise.
-        /// Register all sample filters before creating any reader or writer for this topic: the set of filters is not
-        /// synchronized, so modifying it once the topic is in use races with the Ice threads that use the topic.
+        /// Register all sample filter factories before creating any reader or writer for this topic: the set of
+        /// factories is not synchronized, so modifying it once the topic is in use races with the Ice threads that
+        /// use the topic.
+        /// A sample filter interacts with partial updates: a writer sends only the samples a reader's filter matches,
+        /// so the reader can receive a partial update for a key whose full value it never received. The reader has
+        /// nothing to resolve such updates against and discards them until it receives a full value for the key. And
+        /// when the filter rejects some samples for a key but a later partial update matches, the reader applies that
+        /// update to the last value it received for the key — not to the value the writer computed the update
+        /// against — so the reader's value can silently diverge from the writer's.
         /// @param name The name of the sample filter.
         /// @param factory The filter factory function.
         template<typename Criteria>
@@ -498,6 +507,12 @@ namespace DataStorm
     };
 
     /// The key reader to read the data element associated with a given set of keys.
+    ///
+    /// A multi-key reader retains the current value of every key it has received and not since seen removed, so that
+    /// it can resolve later partial updates against it. This per-key state is independent of the reader's
+    /// `sampleCount` and `sampleLifetime` history settings, and is released when the reader receives the key's remove
+    /// sample. A reader connected to writers over an unbounded set of keys therefore accumulates one current value per
+    /// key.
     /// @headerfile DataStorm/DataStorm.h
     template<typename Key, typename Value, typename UpdateTag = std::string>
     class MultiKeyReader : public Reader<Key, Value, UpdateTag>
@@ -646,6 +661,11 @@ namespace DataStorm
     }
 
     /// The filtered reader to read data elements whose key match a given filter.
+    ///
+    /// A filtered reader retains the current value of every key it has received and not since seen removed, so that it
+    /// can resolve later partial updates against it. This per-key state is independent of the reader's `sampleCount`
+    /// and `sampleLifetime` history settings, and is released when the reader receives the key's remove sample. A
+    /// reader matching an unbounded set of keys therefore accumulates one current value per key.
     /// @headerfile DataStorm/DataStorm.h
     template<typename Key, typename Value, typename UpdateTag = std::string>
     class FilteredKeyReader : public Reader<Key, Value, UpdateTag>
@@ -766,11 +786,20 @@ namespace DataStorm
         /// function generates a SampleEvent::PartialUpdate sample with the given partial update value.
         /// The UpdateValue template parameter must match the UpdateValue type used to register the updater with
         /// the Topic::setUpdater method.
+        /// A partial update resolves against the key's current value, so the key must have a current value when the
+        /// returned function is called: a full value was written for the key and the key was not since removed.
+        /// Calling the returned function for a key with no current value is an application error that throws
+        /// std::logic_error and publishes nothing.
+        /// A reader that uses a sample filter receives only the samples its filter matches: such a reader can lack
+        /// a current value for the key even though the writer has one, and it discards partial updates until it
+        /// receives a full value for the key. See Topic::setSampleFilter.
         /// @param tag The partial update tag.
         template<typename UpdateValue>
         [[nodiscard]] std::function<void(const UpdateValue&)> partialUpdate(const UpdateTag& tag);
 
-        /// Removes the data element. This generates a SampleEvent::Remove sample.
+        /// Removes the data element. This generates a SampleEvent::Remove sample and releases the key's current value
+        /// on the writer and on the readers that receive the sample, so a later partial update has no value to resolve
+        /// against and is rejected until a new full value is written.
         void remove() noexcept;
 
     private:
@@ -778,6 +807,13 @@ namespace DataStorm
     };
 
     /// The key writer to write data elements associated with a given set of keys.
+    ///
+    /// A multi-key writer retains the current value of every key it has written and not since removed, so that later
+    /// partial updates and late-joining readers can resolve against it. This per-key state is the writer's current data
+    /// set, not retained history: it is independent of the `sampleCount` and `sampleLifetime` history settings, which
+    /// bound the retained samples but never the current value of a live key. An any-key writer (one constructed with
+    /// an empty key vector) that writes to an unbounded set of keys therefore accumulates one current value per key;
+    /// call remove(const Key&) to retire a key and release its state once the key is no longer in use.
     /// @headerfile DataStorm/DataStorm.h
     template<typename Key, typename Value, typename UpdateTag = std::string>
     class MultiKeyWriter : public Writer<Key, Value, UpdateTag>
@@ -819,11 +855,20 @@ namespace DataStorm
         /// function generates a SampleEvent::PartialUpdate sample with the given partial update value.
         /// The UpdateValue template parameter must match the UpdateValue type used to register the updater with
         /// the Topic::setUpdater method.
+        /// A partial update resolves against the key's current value, so the key must have a current value when the
+        /// returned function is called: a full value was written for the key and the key was not since removed.
+        /// Calling the returned function for a key with no current value is an application error that throws
+        /// std::logic_error and publishes nothing.
+        /// A reader that uses a sample filter receives only the samples its filter matches: such a reader can lack
+        /// a current value for the key even though the writer has one, and it discards partial updates until it
+        /// receives a full value for the key. See Topic::setSampleFilter.
         /// @param tag The partial update tag.
         template<typename UpdateValue>
         [[nodiscard]] std::function<void(const Key&, const UpdateValue&)> partialUpdate(const UpdateTag& tag);
 
-        /// Removes the data element. This generates a TopicEvent::Remove sample.
+        /// Removes the data element. This generates a SampleEvent::Remove sample and retires the key: its current value
+        /// is released on the writer and on the readers that receive the sample, so a later partial update for the key
+        /// has no value to resolve against and is rejected until a new full value is written.
         /// @param key The key
         void remove(const Key& key) noexcept;
 
@@ -1152,7 +1197,7 @@ namespace DataStorm
               std::move(name),
               config,
               sampleFilter.name,
-              Encoder<SampleFilterCriteria>::encode(topic.getCommunicator(), sampleFilter.criteria)))
+              DataStormI::EncoderT<SampleFilterCriteria>::encode(topic.getCommunicator(), sampleFilter.criteria)))
     {
     }
 
@@ -1197,7 +1242,7 @@ namespace DataStorm
               std::move(name),
               config,
               sampleFilter.name,
-              Encoder<SampleFilterCriteria>::encode(topic.getCommunicator(), sampleFilter.criteria)))
+              DataStormI::EncoderT<SampleFilterCriteria>::encode(topic.getCommunicator(), sampleFilter.criteria)))
     {
     }
 
@@ -1387,7 +1432,7 @@ namespace DataStorm
         auto updateTag = _tagFactory->create(tag);
         return [impl, updateTag](const UpdateValue& value)
         {
-            auto encoded = Encoder<UpdateValue>::encode(impl->getCommunicator(), value);
+            auto encoded = DataStormI::EncoderT<UpdateValue>::encode(impl->getCommunicator(), value);
             impl->publish(nullptr, std::make_shared<DataStormI::SampleT<Key, Value, UpdateTag>>(encoded, updateTag));
         };
     }
@@ -1455,7 +1500,7 @@ namespace DataStorm
         auto keyFactory = _keyFactory;
         return [impl, updateTag, keyFactory](const Key& key, const UpdateValue& value)
         {
-            auto encoded = Encoder<UpdateValue>::encode(impl->getCommunicator(), value);
+            auto encoded = DataStormI::EncoderT<UpdateValue>::encode(impl->getCommunicator(), value);
             impl->publish(
                 keyFactory->create(key),
                 std::make_shared<DataStormI::SampleT<Key, Value, UpdateTag>>(encoded, updateTag));
@@ -1630,13 +1675,19 @@ namespace DataStorm
                                            const std::shared_ptr<DataStormI::Sample>& next,
                                            const Ice::CommunicatorPtr& communicator)
             {
-                Value value;
-                if (previous)
+                // Every updater call site ensures the previous sample exists and has a value before invoking the
+                // updater (the writer throws otherwise, the reader drops the sample), so this assert holds and the
+                // clone below always runs. The guarded branch is not a safe release-build fallback for a broken
+                // invariant: a default-constructed base is null for class-typed values, which the user's updater
+                // would dereference just as if the guard were absent.
+                assert(previous && previous->hasValue());
+                Value value{};
+                if (previous && previous->hasValue())
                 {
                     value = Cloner<Value>::clone(
                         std::static_pointer_cast<DataStormI::SampleT<Key, Value, UpdateTag>>(previous)->getValue());
                 }
-                updater(value, Decoder<UpdateValue>::decode(communicator, next->getEncodedValue()));
+                updater(value, DataStormI::DecoderT<UpdateValue>::decode(communicator, next->getEncodedValue()));
                 std::static_pointer_cast<DataStormI::SampleT<Key, Value, UpdateTag>>(next)->setValue(std::move(value));
             } : std::function<void(const std::shared_ptr<DataStormI::Sample>&,
                                 const std::shared_ptr<DataStormI::Sample>&,

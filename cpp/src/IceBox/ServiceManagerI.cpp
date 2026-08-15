@@ -38,7 +38,13 @@ namespace
                     "ServiceManager: invalid arguments for service '" + name + "':\n" + string{ex.what()});
             }
 
-            assert(!args.empty());
+            if (args.empty())
+            {
+                throw FailureException(
+                    __FILE__,
+                    __LINE__,
+                    "ServiceManager: no entry point specified for service '" + name + "'");
+            }
 
             //
             // Shift the arguments.
@@ -889,7 +895,7 @@ Ice::PropertiesPtr
 IceBox::ServiceManagerI::createServiceProperties(const string& service)
 {
     // We don't want to clone the properties object as we don't want to copy the opt-in prefix list.
-    // NOTE: We always enable the "IceStorm" prefix as there's currently no way  to distinguish it.
+    // NOTE: We always enable the "IceStorm" prefix as there's currently no way to distinguish it.
     PropertiesPtr properties = make_shared<Properties>("IceStorm");
     PropertiesPtr communicatorProperties = _communicator->getProperties();
     if (communicatorProperties->getIcePropertyAsInt("IceBox.InheritProperties") > 0)

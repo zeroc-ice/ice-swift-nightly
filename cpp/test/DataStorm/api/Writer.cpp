@@ -17,6 +17,61 @@ public:
     void run(int, char**) override;
 };
 
+namespace
+{
+    // A user type whose codec specializations provide only the communicator-less (one-arg) encode/decode form. The
+    // reader and writer API adapt such codecs to their two-arg internal calls through DataStormI::EncoderT and
+    // DataStormI::DecoderT; routing this type through the sample-filter, partial-update, and updater paths below
+    // exercises that dispatch.
+    struct CustomValue
+    {
+        int value = 0;
+    };
+
+    // A user type whose Encoder records what it was asked to encode, so a test can check which values a writer
+    // encodes.
+    struct PublishedValue
+    {
+        int value = 0;
+    };
+
+    vector<int>& encodedValues()
+    {
+        static vector<int> values;
+        return values;
+    }
+}
+
+namespace DataStorm
+{
+    template<> struct Encoder<CustomValue>
+    {
+        static Ice::ByteSeq encode(const CustomValue& value) { return {static_cast<std::byte>(value.value)}; }
+    };
+
+    template<> struct Decoder<CustomValue>
+    {
+        static CustomValue decode(const Ice::ByteSeq& data) { return CustomValue{static_cast<int>(data[0])}; }
+    };
+
+    template<> struct Encoder<PublishedValue>
+    {
+        static Ice::ByteSeq encode(const Ice::CommunicatorPtr&, const PublishedValue& value)
+        {
+            encodedValues().push_back(value.value);
+            return {static_cast<std::byte>(value.value)};
+        }
+    };
+
+    template<> struct Decoder<PublishedValue>
+    {
+        static PublishedValue decode(const Ice::CommunicatorPtr&, const Ice::ByteSeq& data)
+        {
+            return PublishedValue{static_cast<int>(data[0])};
+        }
+    };
+}
+
 void ::Writer::run(int argc, char* argv[])
 {
     Node node(argc, argv);
@@ -171,7 +226,7 @@ void ::Writer::run(int argc, char* argv[])
                 test(holder.communicator()->getDefaultObjectAdapter() == nullptr);
                 holder.communicator()->getProperties()->setProperty(
                     "DataStorm.Node.Multicast.Proxy",
-                    "DataStorm/Lookup -d:udp -h 239.255.0.1 -p 10000");
+                    "DataStorm/Lookup2 -d:udp -h 239.255.0.1 -p 10000");
                 Node n17{holder.communicator()};
             }
         }
@@ -260,6 +315,9 @@ void ::Writer::run(int argc, char* argv[])
         t2.setReaderDefaultConfig(ReaderConfig());
 
         tc1.setUpdater<string>("test", [](string&, const string&) {});
+
+        // A communicator-less update codec goes through the DecoderT dispatcher in the registered updater.
+        tc1.setUpdater<CustomValue>("customtag", [](string&, CustomValue) {});
     }
     cout << "ok" << endl;
 
@@ -295,6 +353,8 @@ void ::Writer::run(int argc, char* argv[])
         skwm.add("test");
         skwm.update(string("test"));
         skwm.partialUpdate<int>("updatetag")(10);
+        // A communicator-less update codec goes through the EncoderT dispatcher when publishing the partial update.
+        skwm.partialUpdate<CustomValue>("customtag")(CustomValue{5});
         skwm.remove();
 
         auto skws = make_shared<SingleKeyWriter<string, string>>(topic, "key");
@@ -309,6 +369,7 @@ void ::Writer::run(int argc, char* argv[])
         mkwm.add("key", "test");
         mkwm.update("key", string("test"));
         mkwm.partialUpdate<int>("updatetag")("key", 10);
+        mkwm.partialUpdate<CustomValue>("customtag")("key", CustomValue{5});
         mkwm.remove("key");
 
         auto mkws = make_shared<MultiKeyWriter<string, string>>(topic, vector<string>{"key"});
@@ -323,6 +384,23 @@ void ::Writer::run(int argc, char* argv[])
 
         auto akws = make_shared<MultiKeyWriter<string, string>>(topic, vector<string>{});
         akws = make_shared<MultiKeyWriter<string, string>>(topic, vector<string>{}, "", WriterConfig());
+    }
+    cout << "ok" << endl;
+
+    cout << "testing remove... " << flush;
+    {
+        // A remove sample carries no value, so publishing one encodes nothing.
+        Topic<string, PublishedValue> topic(node, "removetopic");
+
+        auto skw = makeSingleKeyWriter(topic, "key");
+        skw.add(PublishedValue{5});
+        skw.remove();
+        test((encodedValues() == vector<int>{5}));
+
+        auto mkw = makeMultiKeyWriter(topic, {"key"});
+        mkw.add("key", PublishedValue{7});
+        mkw.remove("key");
+        test((encodedValues() == vector<int>{5, 7}));
     }
     cout << "ok" << endl;
 
@@ -349,12 +427,15 @@ void ::Writer::run(int argc, char* argv[])
         testReader(skr);
         auto skrsf = makeSingleKeyReader(topic, "key", Filter<string>("_regex", ".*"));
         skrsf = makeSingleKeyReader(topic, "key", Filter<string>("_regex", ".*"), "", ReaderConfig());
+        // A communicator-less sample-filter codec goes through the EncoderT dispatcher when encoding the criteria.
+        skrsf = makeSingleKeyReader(topic, "key", Filter<CustomValue>("customFilter", CustomValue{1}));
 
         auto mkr = makeMultiKeyReader(topic, {"key"});
         mkr = makeMultiKeyReader(topic, {"key"}, "", ReaderConfig());
         testReader(mkr);
         auto mkrsf = makeMultiKeyReader(topic, {"key"}, Filter<string>("_regex", ".*"));
         mkrsf = makeMultiKeyReader(topic, {"key"}, Filter<string>("_regex", ".*"), "", ReaderConfig());
+        mkrsf = makeMultiKeyReader(topic, {"key"}, Filter<CustomValue>("customFilter", CustomValue{1}));
 
         auto akr = makeAnyKeyReader(topic);
         akr = makeAnyKeyReader(topic, "", ReaderConfig());
@@ -372,6 +453,10 @@ void ::Writer::run(int argc, char* argv[])
             Filter<string>("_regex", ".*"),
             "",
             ReaderConfig());
+        frsf = makeFilteredKeyReader(
+            topic,
+            Filter<string>("_regex", ".*"),
+            Filter<CustomValue>("customFilter", CustomValue{1}));
 
         auto skrs = make_shared<SingleKeyReader<string, string>>(topic, "key");
         skrs = make_shared<SingleKeyReader<string, string>>(topic, "key", "", ReaderConfig());
@@ -424,9 +509,22 @@ void ::Writer::run(int argc, char* argv[])
         test(skw.getLast().getKey() == "key");
         test(skw.getLast().getValue() == "");
         test(skw.getLast().getEvent() == SampleEvent::Remove);
+        // A partial update requires the key to have a current value; after the remove it has none, so publishing a
+        // partial update throws and the remove stays the last sample.
+        try
+        {
+            skw.partialUpdate<string>("partialupdate")("update");
+            test(false);
+        }
+        catch (const std::logic_error&)
+        {
+        }
+        test(skw.getLast().getEvent() == SampleEvent::Remove);
+        // A new full value makes the key updatable again.
+        skw.add("test3");
         skw.partialUpdate<string>("partialupdate")("update");
         test(skw.getLast().getKey() == "key");
-        test(skw.getLast().getValue() == "");
+        test(skw.getLast().getValue() == "test3"); // no updater is registered: the previous value carries over
         test(skw.getLast().getUpdateTag() == "partialupdate");
         test(skw.getLast().getEvent() == SampleEvent::PartialUpdate);
 

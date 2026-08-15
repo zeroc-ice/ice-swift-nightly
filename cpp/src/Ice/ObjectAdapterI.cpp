@@ -48,6 +48,16 @@ namespace
     inline EndpointIPtr toEndpointI(const EndpointPtr& endp) { return dynamic_pointer_cast<EndpointI>(endp); }
 
     string emptyName{};
+
+    // Installed as the dispatch pipeline when the creation of the actual pipeline fails.
+    class FailedDispatchPipeline final : public Object
+    {
+    public:
+        void dispatch(IncomingRequest&, std::function<void(OutgoingResponse)>) final
+        {
+            throw UnknownException{__FILE__, __LINE__, "the object adapter could not create its dispatch pipeline"};
+        }
+    };
 }
 
 Ice::ObjectAdapter::~ObjectAdapter() = default; // avoid weak vtable
@@ -95,7 +105,7 @@ Ice::ObjectAdapterI::activate()
         //
         // One off initializations of the adapter: update the
         // locator registry and print the "adapter ready"
-        // message. We set set state to StateActivating to prevent
+        // message. We set state to StateActivating to prevent
         // deactivation from other threads while these one off
         // initializations are done.
         //
@@ -121,7 +131,7 @@ Ice::ObjectAdapterI::activate()
             //
             // If we couldn't update the locator registry, we let the
             // exception go through and don't activate the adapter to
-            // allow to user code to retry activating the adapter
+            // allow user code to retry activating the adapter
             // later.
             //
             {
@@ -535,11 +545,29 @@ Ice::ObjectAdapterI::dispatchPipeline() const noexcept
     lock_guard lock(_mutex);
     if (!_dispatchPipeline)
     {
-        _dispatchPipeline = _servantManager;
-        while (!_middlewareFactoryStack.empty())
+        try
         {
-            _dispatchPipeline = _middlewareFactoryStack.top()(std::move(_dispatchPipeline));
-            _middlewareFactoryStack.pop();
+            ObjectPtr dispatchPipeline = _servantManager;
+            while (!_middlewareFactoryStack.empty())
+            {
+                dispatchPipeline = _middlewareFactoryStack.top()(std::move(dispatchPipeline));
+                _middlewareFactoryStack.pop();
+            }
+            _dispatchPipeline = std::move(dispatchPipeline);
+        }
+        catch (const std::exception& ex)
+        {
+            Error out(_instance->initializationData().logger);
+            out << "failed to create the dispatch pipeline of object adapter '" << _name << "':\n" << ex;
+            _dispatchPipeline = make_shared<FailedDispatchPipeline>();
+            _middlewareFactoryStack = {};
+        }
+        catch (...)
+        {
+            Error out(_instance->initializationData().logger);
+            out << "failed to create the dispatch pipeline of object adapter '" << _name << "': unknown c++ exception";
+            _dispatchPipeline = make_shared<FailedDispatchPipeline>();
+            _middlewareFactoryStack = {};
         }
     }
     return _dispatchPipeline;
@@ -996,15 +1024,6 @@ Ice::ObjectAdapterI::initialize(optional<RouterPrx> router)
             // fill in the real port number.
             //
             vector<EndpointIPtr> endpoints = parseEndpoints(properties->getProperty(_name + ".Endpoints"), true);
-            for (const auto& endpoint : endpoints)
-            {
-                for (const auto& expanded : endpoint->expandHost())
-                {
-                    auto factory = make_shared<IncomingConnectionFactory>(_instance, expanded, shared_from_this());
-                    factory->initialize();
-                    _incomingConnectionFactories.push_back(factory);
-                }
-            }
             if (endpoints.empty())
             {
                 TraceLevelsPtr tl = _instance->traceLevels();
@@ -1012,6 +1031,24 @@ Ice::ObjectAdapterI::initialize(optional<RouterPrx> router)
                 {
                     Trace out(_instance->initializationData().logger, tl->networkCat);
                     out << "created adapter '" << _name << "' without endpoints";
+                }
+            }
+            else
+            {
+                // An adapter with endpoints accepts incoming connections, and each connection needs the
+                // adapter's dispatch thread pool. Create it before the first connection factory: its
+                // on-demand creation reads the thread pool properties and can throw, and it must not fail
+                // once connections exist.
+                [[maybe_unused]] auto _ = getThreadPool();
+
+                for (const auto& endpoint : endpoints)
+                {
+                    for (const auto& expanded : endpoint->expandHost())
+                    {
+                        auto factory = make_shared<IncomingConnectionFactory>(_instance, expanded, shared_from_this());
+                        factory->initialize();
+                        _incomingConnectionFactories.push_back(factory);
+                    }
                 }
             }
         }

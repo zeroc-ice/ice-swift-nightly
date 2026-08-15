@@ -458,25 +458,21 @@ Slice::JsVisitor::getValue(const TypePtr& type)
             case Builtin::KindBool:
             {
                 return "false";
-                break;
             }
             case Builtin::KindByte:
             case Builtin::KindShort:
             case Builtin::KindInt:
             {
                 return "0";
-                break;
             }
             case Builtin::KindLong:
             {
                 return "0n";
-                break;
             }
             case Builtin::KindFloat:
             case Builtin::KindDouble:
             {
                 return "0.0";
-                break;
             }
             case Builtin::KindString:
             {
@@ -485,7 +481,6 @@ Slice::JsVisitor::getValue(const TypePtr& type)
             default:
             {
                 return "null";
-                break;
             }
         }
     }
@@ -928,8 +923,8 @@ Slice::ImportVisitor::writeImports(
 
         if (jsModule == jsImportedModule || jsImportedModule.empty())
         {
-            // For Slice modules mapped to the same JavaScript module, or Slice files that doesn't use "js:module".
-            // We import them using their Slice include relative path.
+            // For Slice modules mapped to the same JavaScript module, or Slice files that don't use "js:module",
+            // we import them using their Slice include relative path.
             string f = toRelativePath(removeExtension(included) + ".js", unit->topLevelFile());
             imports[f] = sliceTopLevelModules;
             localImports.insert(f);

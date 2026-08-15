@@ -205,7 +205,7 @@ IceInternal::OutgoingConnectionFactory::setRouterInfo(const RouterInfoPtr& route
         // endpoints that differ in the value of the compression flag
         // only, we always set the compression flag to false here in
         // this connection factory. We also clear the timeout as it is
-        // no longer used for Ice 3.8.
+        // no longer used for Ice 3.8 or greater.
         //
         endpoint = endpoint->compress(false)->timeout(-1);
 
@@ -387,7 +387,7 @@ IceInternal::OutgoingConnectionFactory::incPendingConnectCount()
     //
     // Keep track of the number of pending connects. The outgoing connection factory
     // waitUntilFinished() method waits for all the pending connects to terminate before
-    // to return. This ensures that the communicator client thread pool isn't destroyed
+    // returning. This ensures that the communicator client thread pool isn't destroyed
     // too soon and will still be available to execute the ice_exception() callbacks for
     // the asynchronous requests waiting on a connection to be established.
     //
@@ -426,7 +426,7 @@ IceInternal::OutgoingConnectionFactory::getConnection(
             throw Ice::CommunicatorDestroyedException(__FILE__, __LINE__);
         }
 
-        // Search for an existing connections matching one of the given endpoints.
+        // Search for an existing connection matching one of the given endpoints.
         Ice::ConnectionIPtr connection = findConnection(connectors, compress);
         if (connection)
         {
@@ -903,9 +903,9 @@ IceInternal::OutgoingConnectionFactory::ConnectCallback::getConnection()
         {
             //
             // A null return value from getConnection indicates that the connection
-            // is being established and that everthing has been done to ensure that
+            // is being established and that everything has been done to ensure that
             // the callback will be notified when the connection establishment is
-            // done or that the callback already obtain the connection.
+            // done or that the callback already obtained the connection.
             //
             return;
         }
@@ -1510,7 +1510,6 @@ IceInternal::IncomingConnectionFactory::startAcceptor()
         return;
     }
 
-    _acceptorStopped = false;
     createAcceptor();
 }
 
@@ -1523,7 +1522,6 @@ IceInternal::IncomingConnectionFactory::stopAcceptor()
         return;
     }
 
-    _acceptorStopped = true;
     _acceptorStarted = false;
     if (_adapter->getThreadPool()->finish(shared_from_this(), true))
     {

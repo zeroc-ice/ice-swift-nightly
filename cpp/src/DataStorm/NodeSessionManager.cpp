@@ -31,10 +31,13 @@ namespace
                 if (auto session = _nodeSessionManager->getSession(
                         Identity{.name = current.id.name.substr(pos + 1), .category = ""}))
                 {
-                    // Forward the call to the target session, don't need to wait for the result.
+                    // Forward the call to the target session, don't need to wait for the result. The facet is part
+                    // of the addressing and is carried over: a writer addresses a sample-filtered reader under a
+                    // facet of its own, and the reader discards a sample that does not arrive under it.
                     Identity id{.name = current.id.name.substr(0, pos), .category = current.id.category.substr(0, 1)};
                     session->getConnection()
                         ->createProxy(std::move(id))
+                        ->ice_facet(current.facet)
                         ->ice_invokeAsync(
                             current.operation,
                             current.mode,
@@ -71,15 +74,15 @@ NodeSessionManager::init()
 {
     auto instance = _instance.lock();
     assert(instance);
-    auto sessionForwader = make_shared<SessionForwarder>(shared_from_this());
-    instance->getObjectAdapter()->addDefaultServant(sessionForwader, "sf");
-    instance->getObjectAdapter()->addDefaultServant(sessionForwader, "pf");
+    auto sessionForwarder = make_shared<SessionForwarder>(shared_from_this());
+    instance->getObjectAdapter()->addDefaultServant(sessionForwarder, "sf");
+    instance->getObjectAdapter()->addDefaultServant(sessionForwarder, "pf");
 
     auto communicator = instance->getCommunicator();
     const string connectTo = communicator->getProperties()->getIceProperty("DataStorm.Node.ConnectTo");
     if (!connectTo.empty())
     {
-        connect(LookupPrx{communicator, "DataStorm/Lookup:" + connectTo}, _nodePrx);
+        connect(LookupPrx{communicator, communicator->identityToString(lookupIdentity()) + ':' + connectTo}, _nodePrx);
     }
 }
 
@@ -561,7 +564,7 @@ NodeSessionManager::destroySession(const ConnectionPtr& connection, const NodePr
     // Drop any announcements received over this connection; they can no longer be reached or refreshed.
     removeAnnouncements(connection);
 
-    // Destroy the connection if the session is still using it, otherwise the node has already
+    // Destroy the session if it is still using this connection, otherwise the node has already
     // replaced its NodeSession and it is using a new connection.
     auto p = _sessions.find(node->ice_getIdentity());
     if (p != _sessions.end() && p->second->getConnection() == connection)

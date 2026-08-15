@@ -222,6 +222,10 @@ namespace Ice
         void executeCallback(const CloseCallback& callback) noexcept;
         void executeCallback(const std::function<void()>& callback) noexcept;
 
+        /// Gets the thread pool that services this connection: the client thread pool for an outgoing connection,
+        /// and the object adapter's thread pool for an incoming connection.
+        [[nodiscard]] const IceInternal::ThreadPoolPtr& getThreadPool() const noexcept { return _threadPool; }
+
         /// Aborts the connection with a ConnectionAbortedException if the connection is active and did not receive
         /// a byte for some time. See the IdleTimeoutTransceiverDecorator.
         void idleCheck(const std::chrono::seconds& idleTimeout) noexcept;
@@ -249,7 +253,7 @@ namespace Ice
             const IceInternal::EndpointIPtr&,
             const std::shared_ptr<ObjectAdapterI>&,
             std::function<void(const ConnectionIPtr&)>,
-            const ConnectionOptions&) noexcept;
+            const ConnectionOptions&);
 
         static ConnectionIPtr create(
             const Ice::CommunicatorPtr&,
@@ -288,12 +292,12 @@ namespace Ice
         bool validate(IceInternal::SocketOperation = IceInternal::SocketOperationNone);
 
         /// Sends the next queued messages. This method is called by message() once the message which is being sent
-        /// (_sendStreams.First) is fully sent. Before sending the next message, this message is removed from
-        /// _sendsStream. If any, its sent callback is also queued in given callback queue.
+        /// (_sendStreams.front()) is fully sent. Before sending the next message, this message is removed from
+        /// _sendStreams. If any, its sent callback is also queued in given callback queue.
         ///
         /// @param callbacks The sent callbacks to call for the messages that were sent.
         /// @return The socket operation to register with the thread pool's selector to send the remainder of the
-        /// pending message being sent (_sendStreams.First).
+        /// pending message being sent (_sendStreams.front()).
         IceInternal::SocketOperation sendNextMessages(std::vector<OutgoingMessage>& callbacks);
 
         /// Sends or queues the given message.

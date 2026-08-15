@@ -3,7 +3,6 @@
 #include "Network.h"
 #include "Ice/LocalExceptions.h"
 #include "Ice/LoggerUtil.h" // For setTcpBufSize
-#include "Ice/Properties.h" // For setTcpBufSize
 #include "Ice/StringUtil.h"
 #include "NetworkProxy.h"
 #include "ProtocolInstance.h" // For setTcpBufSize
@@ -242,7 +241,7 @@ namespace
         if (pos != string::npos)
         {
             //
-            // If it's a link-local address, use the zone indice.
+            // If it's a link-local address, use the zone index.
             //
             isAddr = false;
             name = intf.substr(pos + 1);
@@ -387,7 +386,7 @@ namespace
                 while (paddrs)
                 {
                     //
-                    // Don't need to pass a wide string converter as the wide string come
+                    // Don't need to pass a wide string converter as the wide string comes
                     // from Windows API.
                     //
                     if (wstringToString(paddrs->FriendlyName, getProcessStringConverter()) == name)
@@ -580,7 +579,7 @@ IceInternal::getAddresses(const string& host, int port, ProtocolSupport protocol
     } while (info == nullptr && rs == EAI_AGAIN && --retry >= 0);
 
     // In theory, getaddrinfo should only return EAI_NONAME if
-    // AI_NUMERICHOST is specified and the host name is not a IP
+    // AI_NUMERICHOST is specified and the host name is not an IP
     // address. However on some platforms (e.g. macOS 10.4.x)
     // EAI_NODATA is also returned so we also check for it.
 #ifdef EAI_NODATA
@@ -1087,26 +1086,6 @@ IceInternal::isMulticast(const Address& addr)
 }
 
 void
-IceInternal::setTcpBufSize(SOCKET fd, const ProtocolInstancePtr& instance)
-{
-    assert(fd != INVALID_SOCKET);
-
-    //
-    // By default, on Windows we use a 128KB buffer size. On Unix
-    // platforms, we use the system defaults.
-    //
-#ifdef _WIN32
-    const int dfltBufSize = 128 * 1024;
-#else
-    const int dfltBufSize = 0;
-#endif
-    int32_t rcvSize = instance->properties()->getPropertyAsIntWithDefault("Ice.TCP.RcvSize", dfltBufSize);
-    int32_t sndSize = instance->properties()->getPropertyAsIntWithDefault("Ice.TCP.SndSize", dfltBufSize);
-
-    setTcpBufSize(fd, rcvSize, sndSize, instance);
-}
-
-void
 IceInternal::setTcpBufSize(SOCKET fd, int rcvSize, int sndSize, const ProtocolInstancePtr& instance)
 {
     assert(fd != INVALID_SOCKET);
@@ -1120,7 +1099,7 @@ IceInternal::setTcpBufSize(SOCKET fd, int rcvSize, int sndSize, const ProtocolIn
         //
         setRecvBufferSize(fd, rcvSize);
         int size = getRecvBufferSize(fd);
-        if (size > 0 && size < rcvSize)
+        if (size < rcvSize)
         {
             // Warn if the size that was set is less than the requested size and
             // we have not already warned.
@@ -1143,7 +1122,7 @@ IceInternal::setTcpBufSize(SOCKET fd, int rcvSize, int sndSize, const ProtocolIn
         //
         setSendBufferSize(fd, sndSize);
         int size = getSendBufferSize(fd);
-        if (size > 0 && size < sndSize)
+        if (size < sndSize)
         {
             // Warn if the size that was set is less than the requested size and
             // we have not already warned.
@@ -1217,10 +1196,8 @@ IceInternal::setSendBufferSize(SOCKET fd, int sz)
 int
 IceInternal::getSendBufferSize(SOCKET fd)
 {
-    int sz;
-    socklen_t len = sizeof(sz);
-    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&sz), &len) == SOCKET_ERROR ||
-        static_cast<unsigned int>(len) != sizeof(sz))
+    int sz = getSendBufferSizeNoThrow(fd);
+    if (sz == 0)
     {
         closeSocketNoThrow(fd);
         throw SocketException(__FILE__, __LINE__, getSocketErrno());
@@ -1241,13 +1218,37 @@ IceInternal::setRecvBufferSize(SOCKET fd, int sz)
 int
 IceInternal::getRecvBufferSize(SOCKET fd)
 {
+    int sz = getRecvBufferSizeNoThrow(fd);
+    if (sz == 0)
+    {
+        closeSocketNoThrow(fd);
+        throw SocketException(__FILE__, __LINE__, getSocketErrno());
+    }
+    return sz;
+}
+
+int
+IceInternal::getSendBufferSizeNoThrow(SOCKET fd) noexcept
+{
+    int sz;
+    socklen_t len = sizeof(sz);
+    if (getsockopt(fd, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&sz), &len) == SOCKET_ERROR ||
+        static_cast<unsigned int>(len) != sizeof(sz))
+    {
+        return 0;
+    }
+    return sz;
+}
+
+int
+IceInternal::getRecvBufferSizeNoThrow(SOCKET fd) noexcept
+{
     int sz;
     socklen_t len = sizeof(sz);
     if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&sz), &len) == SOCKET_ERROR ||
         static_cast<unsigned int>(len) != sizeof(sz))
     {
-        closeSocketNoThrow(fd);
-        throw SocketException(__FILE__, __LINE__, getSocketErrno());
+        return 0;
     }
     return sz;
 }
@@ -1826,7 +1827,7 @@ void
 IceInternal::doConnectAsync(SOCKET fd, const Address& addr, const Address& sourceAddr, AsyncInfo& info)
 {
     //
-    // NOTE: It's the caller's responsability to close the socket upon
+    // NOTE: It's the caller's responsibility to close the socket upon
     // failure to connect. The socket isn't closed by this method.
     //
     Address bindAddr;

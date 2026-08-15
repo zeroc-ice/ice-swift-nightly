@@ -597,6 +597,7 @@ testCertificateVerification(
         try
         {
             server->ice_ping();
+            test(false);
         }
         catch (const Ice::SecurityException&)
         {
@@ -620,6 +621,7 @@ testCertificateVerification(
         try
         {
             server->ice_ping();
+            test(false);
         }
         catch (const Ice::SecurityException&)
         {
@@ -655,7 +657,7 @@ testCertificateVerification(
         comm->destroy();
 
         // Target host matches the certificate Common Name and the certificate has a DNS altName that does not
-        // matches the target host.
+        // match the target host.
         initData.properties = createClientProps(defaultProps, p12, "ca1/client", "ca1/ca1");
         initData.properties->setProperty("IceSSL.CheckCertName", "1");
         comm = initialize(initData);
@@ -787,7 +789,7 @@ testFindCert(const string& factoryRef, const string& defaultDir, const Ice::Prop
         initData.properties->setProperty("IceSSL.CertStoreLocation", "CurrentUser");
         initData.properties->setProperty("IceSSL.FindCert", clientFindCertProperties[i]);
 
-        // Use TrustOnly to ensure the peer has pick the expected certificate.
+        // Use TrustOnly to ensure the peer has picked the expected certificate.
         initData.properties->setProperty("IceSSL.TrustOnly", "CN=ca1.server");
 
         CommunicatorPtr comm = initialize(initData);
@@ -798,7 +800,7 @@ testFindCert(const string& factoryRef, const string& defaultDir, const Ice::Prop
         d["IceSSL.CAs"] = "ca1/ca1_cert.pem";
         d["IceSSL.FindCert"] = serverFindCertProperties[i];
 
-        // Use TrustOnly to ensure the peer has pick the expected certificate.
+        // Use TrustOnly to ensure the peer has picked the expected certificate.
         d["IceSSL.TrustOnly"] = "CN=ca1.client";
 
         optional<Test::ServerPrx> server = fact->createServer(d);
@@ -845,7 +847,7 @@ testFindCert(const string& factoryRef, const string& defaultDir, const Ice::Prop
     import.cleanup();
 
     //
-    // These must fail because we have already remove the certificates.
+    // These must fail because we have already removed the certificates.
     //
     for (int i = 0; clientFindCertProperties[i] != 0; i++)
     {
@@ -911,7 +913,7 @@ testFindCert(const string& factoryRef, const string& defaultDir, const Ice::Prop
         initData.properties->setProperty("IceSSL.KeychainPassword", "password");
         initData.properties->setProperty("IceSSL.FindCert", clientFindCertProperties[i]);
 
-// Use TrustOnly to ensure the peer has pick the expected certificate.
+        // Use TrustOnly to ensure the peer has picked the expected certificate.
 #    ifndef ICE_USE_SECURE_TRANSPORT_IOS
         initData.properties->setProperty("IceSSL.TrustOnly", "CN=ca1.server");
 #    endif
@@ -925,7 +927,7 @@ testFindCert(const string& factoryRef, const string& defaultDir, const Ice::Prop
         d["IceSSL.KeychainPassword"] = "password";
         d["IceSSL.FindCert"] = serverFindCertProperties[i];
 
-        // Use TrustOnly to ensure the peer has pick the expected certificate.
+        // Use TrustOnly to ensure the peer has picked the expected certificate.
 #    ifndef ICE_USE_SECURE_TRANSPORT_IOS
         d["IceSSL.TrustOnly"] = "CN=ca1.client";
 #    endif
@@ -1249,8 +1251,37 @@ testEncryptedKey(const string&, const Ice::PropertiesPtr&)
 }
 #endif
 
+// Load a PKCS12 certificate whose password is empty, with IceSSL.Password left empty too. The fixtures are
+// written by `openssl pkcs12 -export -passout pass:`.
 void
-testMutlipleCACerts(const string& factoryRef, const Ice::PropertiesPtr& defaultProps, bool p12)
+testPasswordLessCert(const string& factoryRef, const Ice::PropertiesPtr& defaultProps)
+{
+    cout << "testing PKCS12 certificate without a password... " << flush;
+    InitializationData initData;
+    initData.properties = createClientProps(defaultProps, true, "ca1/client_password_less", "ca1/ca1");
+    initData.properties->setProperty("IceSSL.Password", "");
+    CommunicatorPtr comm = initialize(initData);
+    Test::ServerFactoryPrx fact{comm, factoryRef};
+
+    Test::Properties d = createServerProps(defaultProps, true, "ca1/server_password_less", "ca1/ca1");
+    d["IceSSL.Password"] = "";
+    optional<Test::ServerPrx> server = fact->createServer(d);
+    try
+    {
+        server->ice_ping();
+    }
+    catch (const LocalException& ex)
+    {
+        cerr << ex << endl;
+        test(false);
+    }
+    fact->destroyServer(server);
+    comm->destroy();
+    cout << "ok" << endl;
+}
+
+void
+testMultipleCACerts(const string& factoryRef, const Ice::PropertiesPtr& defaultProps, bool p12)
 {
     cout << "testing multiple CA certificates... " << flush;
     {
@@ -2120,9 +2151,9 @@ testCrlRevocation(const string& factoryRef, const string& defaultDir, const Ice:
     CommunicatorPtr comm;
     InitializationData initData;
 
-    // First test with non revoked certificate that include CRL distribution point
+    // First test with non revoked certificate that includes CRL distribution point
     initData.properties = createClientProps(defaultProps, p12, "", "ca3/ca3");
-    // CLR file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
+    // CRL file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
     initData.properties->setProperty("IceSSL.CertificateRevocationListFiles", "ca3/ca3.crl.pem");
     initData.properties->setProperty("IceSSL.RevocationCheck", "1");
     initData.properties->setProperty("IceSSL.RevocationCheckCacheOnly", "0");
@@ -2142,7 +2173,7 @@ testCrlRevocation(const string& factoryRef, const string& defaultDir, const Ice:
 
     // Repeat with RevocationCheck=2 to check whole chain
     initData.properties = createClientProps(defaultProps, p12, "", "ca3/ca3");
-    // CLR file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
+    // CRL file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
     initData.properties->setProperty("IceSSL.CertificateRevocationListFiles", "ca3/ca3.crl.pem");
     initData.properties->setProperty("IceSSL.RevocationCheck", "2");
     initData.properties->setProperty("IceSSL.RevocationCheckCacheOnly", "0");
@@ -2162,7 +2193,7 @@ testCrlRevocation(const string& factoryRef, const string& defaultDir, const Ice:
     // Repeat with revoked certificate
     initData.properties = createClientProps(defaultProps, p12, "", "ca3/ca3");
     initData.properties->setProperty("IceSSL.RevocationCheck", "0");
-    // CLR file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
+    // CRL file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
     initData.properties->setProperty("IceSSL.CertificateRevocationListFiles", "ca3/ca3.crl.pem");
     comm = initialize(initData);
     fact = Test::ServerFactoryPrx{comm, factoryRef};
@@ -2171,7 +2202,7 @@ testCrlRevocation(const string& factoryRef, const string& defaultDir, const Ice:
     d["IceSSL.VerifyPeer"] = "0";
     server = fact->createServer(d);
 
-    // Revoked certificate is accepted because IceSSL.RevocationCheck=0 disable revocation checks
+    // Revoked certificate is accepted because IceSSL.RevocationCheck=0 disables revocation checks
     server->ice_ping();
     info = dynamic_pointer_cast<Ice::SSL::ConnectionInfo>(server->ice_getConnection()->getInfo());
     fact->destroyServer(server);
@@ -2210,7 +2241,7 @@ testCrlRevocation(const string& factoryRef, const string& defaultDir, const Ice:
     initData.properties = createClientProps(defaultProps, p12, "", "ca3/ca3");
     initData.properties->setProperty("IceSSL.RevocationCheck", "2");
     initData.properties->setProperty("IceSSL.RevocationCheckCacheOnly", "0");
-    // CLR file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
+    // CRL file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
     initData.properties->setProperty("IceSSL.CertificateRevocationListFiles", "ca3/i1/i1.crl.pem");
     initData.properties->setProperty("IceSSL.VerifyPeer", "0");
     comm = initialize(initData);
@@ -2237,7 +2268,7 @@ testCrlRevocation(const string& factoryRef, const string& defaultDir, const Ice:
     initData.properties = createClientProps(defaultProps, p12, "", "ca3/ca3");
     initData.properties->setProperty("IceSSL.RevocationCheck", "1");
     initData.properties->setProperty("IceSSL.RevocationCheckCacheOnly", "0");
-    // CLR file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
+    // CRL file used by OpenSSL, OpenSSL doesn't check the CRL distribution points.
     initData.properties->setProperty("IceSSL.CertificateRevocationListFiles", "ca3/i1/i1.crl.pem");
     initData.properties->setProperty("IceSSL.VerifyPeer", "0");
 
@@ -2272,7 +2303,7 @@ testOcspRevocation(const string& factoryRef, const string& defaultDir, const Ice
     CommunicatorPtr comm;
     InitializationData initData;
 
-    // First test with non revoked certificate that include AIA info
+    // First test with non revoked certificate that includes AIA info
     initData.properties = createClientProps(defaultProps, p12, "", "ca4/ca4");
     initData.properties->setProperty("IceSSL.RevocationCheck", "1");
     initData.properties->setProperty("IceSSL.RevocationCheckCacheOnly", "0");
@@ -2352,7 +2383,7 @@ testOcspRevocation(const string& factoryRef, const string& defaultDir, const Ice
 
     // Repeat with RevocationCheck=1 to only check the end cert
 #    ifndef ICE_USE_SECURE_TRANSPORT
-    // SecureTransport always check the whole chain for revocation
+    // SecureTransport always checks the whole chain for revocation
     initData.properties = createClientProps(defaultProps, p12, "", "ca4/ca4");
     initData.properties->setProperty("IceSSL.RevocationCheck", "1");
     initData.properties->setProperty("IceSSL.RevocationCheckCacheOnly", "0");
@@ -2371,7 +2402,7 @@ testOcspRevocation(const string& factoryRef, const string& defaultDir, const Ice
     comm->destroy();
 #    endif
 
-    // Repeat with a certificate that is unknow for the OCSP responder
+    // Repeat with a certificate that is unknown for the OCSP responder
     initData.properties = createClientProps(defaultProps, p12, "", "ca4/ca4");
     initData.properties->setProperty("IceSSL.RevocationCheck", "1");
     initData.properties->setProperty("IceSSL.RevocationCheckCacheOnly", "0");
@@ -2429,7 +2460,11 @@ allTests(Test::TestHelper* helper, const string& defaultDir, bool p12)
     testCertificateChains(factory, defaultDir, defaultProps, p12);
     testCAsDirectory(factory, defaultDir, defaultProps, p12);
     testEncryptedKey(factory, defaultProps);
-    testMutlipleCACerts(factory, defaultProps, p12);
+    if (p12)
+    {
+        testPasswordLessCert(factory, defaultProps);
+    }
+    testMultipleCACerts(factory, defaultProps, p12);
     testDerCertificates(factory, defaultProps, p12);
     testTrustOnly(factory, defaultProps, p12);
     testCrlRevocation(factory, defaultDir, defaultProps, p12);

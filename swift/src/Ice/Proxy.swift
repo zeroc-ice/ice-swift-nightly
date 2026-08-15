@@ -74,7 +74,8 @@ public protocol ObjectPrx: CustomStringConvertible, AnyObject, Sendable {
 
     /// Creates a proxy that is identical to this proxy, except for the locator cache timeout.
     ///
-    /// - Parameter timeout: The new locator cache timeout (in seconds).
+    /// - Parameter timeout: The new locator cache timeout (in seconds). Any negative value means infinite and is
+    ///   normalized to -1.
     /// - Returns: A proxy with the new timeout.
     func ice_locatorCacheTimeout(_ timeout: Int32) -> Self
 
@@ -85,7 +86,8 @@ public protocol ObjectPrx: CustomStringConvertible, AnyObject, Sendable {
 
     /// Creates a proxy that is identical to this proxy, except for the invocation timeout.
     ///
-    /// - Parameter timeout: The new invocation timeout (in milliseconds).
+    /// - Parameter timeout: The new invocation timeout (in milliseconds). Zero or any negative value means infinite
+    ///   and is normalized to -1.
     /// - Returns: A proxy with the new timeout.
     func ice_invocationTimeout(_ timeout: Int32) -> Self
 
@@ -229,10 +231,19 @@ public protocol ObjectPrx: CustomStringConvertible, AnyObject, Sendable {
     /// - Returns: `true` if this proxy is a fixed proxy, `false` otherwise.
     func ice_isFixed() -> Bool
 
-    /// Gets the cached Connection for this proxy. If the proxy does not yet have an established connection, it does
-    /// not attempt to create a connection.
+    /// Gets the cached ``Connection`` for this proxy. Once this proxy has been associated with a connection
+    /// (typically during its first invocation), it caches this connection and continues using it for subsequent
+    /// invocations, until an invocation on this proxy fails. This method never attempts to establish a connection.
+    /// For a fixed proxy, this method returns the connection this proxy is bound to, even when this connection is
+    /// closed.
     ///
-    /// - Returns: The cached connection for this proxy, or nil if the proxy does not have an established connection.
+    /// A proxy with connection caching disabled (see ``ice_connectionCached(_:)``) never caches a connection: for
+    /// such a proxy, this method always returns nil. This method also returns nil when this proxy reaches its
+    /// target object through collocation optimization (see ``ice_collocationOptimized(_:)``): collocated invocations
+    /// don't use a connection.
+    ///
+    /// - Returns: The cached connection, or nil if this proxy doesn't have a cached connection. The returned
+    ///   connection can be closed.
     func ice_getCachedConnection() -> Connection?
 
     /// Creates a stringified version of this proxy.
@@ -240,9 +251,9 @@ public protocol ObjectPrx: CustomStringConvertible, AnyObject, Sendable {
     /// - Returns: A stringified proxy.
     func ice_toString() -> String
 
-    /// Determines whether this proxy uses collocation optimization.
+    /// Determines whether this proxy has collocation optimization enabled (see ``ice_collocationOptimized(_:)``).
     ///
-    /// - Returns: `true` if the proxy uses collocation optimization, `false` otherwise.
+    /// - Returns: `true` if this proxy has collocation optimization enabled, `false` otherwise.
     func ice_isCollocationOptimized() -> Bool
 
     /// Creates a proxy that is identical to this proxy, except for collocation optimization.
@@ -258,7 +269,7 @@ public protocol ObjectPrx: CustomStringConvertible, AnyObject, Sendable {
 ///    - communicator: The communicator of the new proxy.
 ///    - proxyString: The proxy string to parse.
 ///    - type: The type of the new proxy.
-/// - Throws: `Ice.ParseException` if the proxy string is invalid.
+/// - Throws: ``ParseException`` if the proxy string is invalid.
 /// - Returns: A new proxy with the requested type.
 public func makeProxy(communicator: Ice.Communicator, proxyString: String, type: ObjectPrx.Protocol)
     throws -> ObjectPrx
@@ -394,11 +405,12 @@ extension ObjectPrx {
     /// - Parameters:
     ///   - operation: The name of the operation to invoke.
     ///   - mode: The operation mode (normal or idempotent).
-    ///   - inEncaps: The encoded in-parameters for the operation.
+    ///   - inEncaps: The encoded in-parameters for the operation. You can pass empty data when the operation takes
+    ///     no in-parameters; the Ice runtime then marshals an empty encapsulation.
     ///   - context: The context dictionary for the invocation.
     /// - Returns: `ok` is `true` if the operation completed successfully, `false` if it completed with a user
     ///   exception; `outEncaps` contains the encoded results (or the encoded user exception when `ok` is false).
-    ///   For oneway and batch proxies, `ok` is always `true` and `outEncaps` is empty.
+    ///   For oneway, datagram, and batch proxies, `ok` is always `true` and `outEncaps` is empty.
     public func ice_invoke(
         operation: String,
         mode: OperationMode,
@@ -458,8 +470,9 @@ extension ObjectPrx {
         }
     }
 
-    /// Returns the connection for this proxy. If the proxy does not yet have an established connection,
-    /// it first attempts to create a connection.
+    /// Returns the connection for this proxy. If the proxy does not yet have an established connection or its
+    /// connection is closed or being closed, it first attempts to create a new connection. For a fixed proxy,
+    /// this method returns the connection this proxy is bound to, even when this connection is closed.
     ///
     /// - Returns: The connection for this proxy, or `nil` when the proxy uses collocation optimization and
     ///   communicates with a collocated object adapter.
@@ -613,7 +626,6 @@ open class ObjectPrxI: ObjectPrx, @unchecked Sendable {
 
     public func ice_locatorCacheTimeout(_ timeout: Int32) -> Self {
         precondition(!ice_isFixed(), "Cannot create a fixed proxy with a locatorCacheTimeout")
-        precondition(timeout >= -1, "Invalid locator cache timeout value")
         do {
             return try autoreleasepool {
                 try fromICEObjectPrx(handle.ice_locatorCacheTimeout(timeout)) as Self
@@ -628,7 +640,6 @@ open class ObjectPrxI: ObjectPrx, @unchecked Sendable {
     }
 
     public func ice_invocationTimeout(_ timeout: Int32) -> Self {
-        precondition(timeout >= 1 || timeout == -1 || timeout == -2, "Invalid invocation timeout value")
         do {
             return try autoreleasepool {
                 try fromICEObjectPrx(handle.ice_invocationTimeout(timeout)) as Self

@@ -38,8 +38,8 @@ IceInternal::isAbsolutePath(const string& path)
     }
 
 #ifdef _WIN32
-    // We need at least 3 non whitespace character to have
-    // and absolute path
+    // We need at least 3 non whitespace characters to have
+    // an absolute path
     if (i + 3 > size)
     {
         return false;
@@ -199,7 +199,7 @@ int
 IceInternal::getcwd(string& cwd)
 {
     //
-    // Don't need to use a wide string converter, the wide string come
+    // Don't need to use a wide string converter, the wide string comes
     // from Windows API.
     //
     wchar_t cwdbuf[_MAX_PATH];
@@ -242,19 +242,19 @@ IceInternal::FileLock::FileLock(const std::string& path) : _path(path)
         throw FileLockException(__FILE__, __LINE__, GetLastError(), _path);
     }
 
-    OVERLAPPED overlaped;
-    overlaped.Internal = 0;
-    overlaped.InternalHigh = 0;
-    overlaped.Offset = 0;
-    overlaped.OffsetHigh = 0;
+    OVERLAPPED overlapped;
+    overlapped.Internal = 0;
+    overlapped.InternalHigh = 0;
+    overlapped.Offset = 0;
+    overlapped.OffsetHigh = 0;
 
 #    if defined(_MSC_VER)
-    overlaped.hEvent = nullptr;
+    overlapped.hEvent = nullptr;
 #    else
-    overlaped.hEvent = 0;
+    overlapped.hEvent = 0;
 #    endif
 
-    if (::LockFileEx(_fd, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 0, 0, &overlaped) == 0)
+    if (::LockFileEx(_fd, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 0, 0, &overlapped) == 0)
     {
         ::CloseHandle(_fd);
         throw FileLockException(__FILE__, __LINE__, GetLastError(), _path);
@@ -363,7 +363,7 @@ IceInternal::FileLock::FileLock(const std::string& path) : _path(path)
     //
 
     //
-    // Now that we have acquire an exclusive write lock,
+    // Now that we have acquired an exclusive write lock,
     // write the process pid there.
     //
     ostringstream os;

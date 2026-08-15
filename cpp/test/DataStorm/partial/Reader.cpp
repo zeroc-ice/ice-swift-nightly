@@ -18,6 +18,84 @@ public:
     void run(int, char**) override;
 };
 
+// A value type with a custom encoding whose default value (0) encodes to zero bytes. The default Ice encoding never
+// produces an empty byte sequence, so only a custom Encoder can, and such a full value must remain a usable
+// partial-update base.
+struct Counter
+{
+    int value = 0;
+};
+
+// An update tag type whose Decoder rejects one of the tag values. A writer sends its whole set of update tags to a
+// reader when they attach, so an undecodable tag arrives together with the tags the reader can decode.
+struct Op
+{
+    std::string name;
+
+    bool operator<(const Op& other) const { return name < other.name; }
+    bool operator==(const Op& other) const { return name == other.name; }
+};
+
+namespace DataStorm
+{
+    template<> struct Encoder<Op>
+    {
+        static Ice::ByteSeq encode(const Ice::CommunicatorPtr&, const Op& tag)
+        {
+            Ice::ByteSeq bytes;
+            bytes.reserve(tag.name.size());
+            for (char c : tag.name)
+            {
+                bytes.push_back(static_cast<std::byte>(c));
+            }
+            return bytes;
+        }
+    };
+
+    template<> struct Decoder<Op>
+    {
+        static Op decode(const Ice::CommunicatorPtr&, const Ice::ByteSeq& data)
+        {
+            std::string name;
+            name.reserve(data.size());
+            for (std::byte b : data)
+            {
+                name += static_cast<char>(b);
+            }
+            if (name == "undecodable")
+            {
+                throw std::runtime_error("undecodable update tag");
+            }
+            return Op{name};
+        }
+    };
+
+    template<> struct Encoder<Counter>
+    {
+        static Ice::ByteSeq encode(const Ice::CommunicatorPtr&, const Counter& value)
+        {
+            // The default value encodes to zero bytes; any other value encodes to a single byte.
+            if (value.value == 0)
+            {
+                return {};
+            }
+            return {static_cast<std::byte>(value.value)};
+        }
+    };
+
+    template<> struct Decoder<Counter>
+    {
+        static Counter decode(const Ice::CommunicatorPtr&, const Ice::ByteSeq& data)
+        {
+            if (!data.empty() && data[0] == std::byte{0xFF})
+            {
+                throw std::runtime_error("undecodable counter");
+            }
+            return Counter{data.empty() ? 0 : static_cast<int>(data[0])};
+        }
+    };
+}
+
 void ::Reader::run(int argc, char* argv[])
 {
     Node node(argc, argv);
@@ -47,7 +125,7 @@ void ::Reader::run(int argc, char* argv[])
         test(sample.getUpdateTag() == "price");
         test(sample.getValue()->price == 18.0f);
 
-        // Late joining reader should still receive update events instead of partial updates
+        // Late joining reader with full history should still receive the partial update events
         auto reader2 = makeSingleKeyReader(topic, "AAPL");
         sample = reader2.getNextUnread();
         test(sample.getEvent() == SampleEvent::Add);
@@ -94,9 +172,8 @@ void ::Reader::run(int argc, char* argv[])
         test(aapl->lastAsk == 14.0f); // AAPL's own ask, not GOOG's 102
     }
 
-    // A persistent multi-key reader attaches to writer 1 under both keys; writer 1's detach leaves a stale entry
-    // in the reader's per-key subscriber map, and writer 2's attach drives SessionI::getLastIds over it, which
-    // must not dereference null.
+    // A persistent multi-key reader attaches to writer 1 under both keys. After writer 1 is destroyed, the reader
+    // attaches to writer 2 under both keys again and reads its sample.
     Topic<string, int> detachTopic(node, "multiKeyDetach");
     detachTopic.setReaderDefaultConfig(config);
     Topic<string, int> detachBarrier(node, "multiKeyDetachBarrier");
@@ -105,14 +182,13 @@ void ::Reader::run(int argc, char* argv[])
         auto sample = reader.getNextUnread(); // from writer 1
         test(sample.getValue() == 1);
 
-        // Wait until writer 1's detach has been processed (this is what leaves the stale per-key entry), then
-        // tell the writer it can create writer 2.
+        // Wait until writer 1's detach has been processed, then tell the writer it can create writer 2.
         reader.waitForNoWriters();
         auto barrier = makeSingleKeyWriter(detachBarrier, "barrier");
         barrier.waitForReaders();
         barrier.update(0);
 
-        sample = reader.getNextUnread(); // from writer 2: attach runs getLastIds over the stale entry
+        sample = reader.getNextUnread(); // from writer 2
         test(sample.getValue() == 2);
     }
 
@@ -332,6 +408,183 @@ void ::Reader::run(int argc, char* argv[])
         auto done = makeSingleKeyWriter(throwBarrier, "done");
         done.waitForReaders();
         done.update(0);
+    }
+
+    // A partial update requires the key to have a current value: after a remove, publishing a partial update throws
+    // on the writer and nothing is published; the next full value makes the key updatable again.
+    Topic<string, StockPtr> removeTopic(node, "removeTopic");
+    removeTopic.setReaderDefaultConfig(config);
+    removeTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    {
+        auto reader = makeSingleKeyReader(removeTopic, "AAPL");
+
+        auto sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Add);
+        test(sample.getValue()->price == 12.0f);
+
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Remove);
+
+        // The discarded partial update was never published: the next sample is the full update.
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Update);
+        test(sample.getValue()->price == 20.0f);
+    }
+
+    // Two writers publish the same key: writer 2's partial update reaches the reader after writer 1's remove
+    // cleared the key's value. The reader discards the partial update and resynchronizes on writer 2's next full
+    // value.
+    Topic<string, StockPtr> twoWritersTopic(node, "twoWritersTopic");
+    twoWritersTopic.setReaderDefaultConfig(config);
+    twoWritersTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    {
+        auto reader = makeSingleKeyReader(twoWritersTopic, "AAPL");
+
+        // Consume until writer 2's resynchronizing full value; the partial update published after the remove must
+        // never surface.
+        bool sawRemove = false;
+        shared_ptr<Stock> resync;
+        while (!resync)
+        {
+            auto sample = reader.getNextUnread();
+            test(sample.getEvent() != SampleEvent::PartialUpdate);
+            if (sample.getEvent() == SampleEvent::Remove)
+            {
+                sawRemove = true;
+            }
+            else if (sample.getValue()->price == 200.0f)
+            {
+                resync = sample.getValue();
+            }
+        }
+        test(sawRemove);
+        test(resync->lastBid == 201.0f); // writer 2's full value, not a merge against a stale base
+    }
+
+    // A late-joining reader initializes across a remove. It receives the add, the remove, the re-add, and the partial
+    // update as initialization samples; the remove clears the key's base within the init batch and the partial
+    // resolves against the re-added value, not the pre-remove value or a default-constructed one.
+    Topic<string, StockPtr> initRemoveTopic(node, "initRemoveTopic");
+    initRemoveTopic.setReaderDefaultConfig(config);
+    initRemoveTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    Topic<string, int> initRemoveBarrier(node, "initRemoveBarrier");
+    {
+        // Wait until the writer has published all four samples, then attach as a late joiner.
+        [[maybe_unused]] auto _ = makeSingleKeyReader(initRemoveBarrier, "barrier").getNextUnread();
+
+        auto reader = makeSingleKeyReader(initRemoveTopic, "AAPL");
+
+        auto sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Add);
+        test(sample.getValue()->price == 12.0f);
+
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Remove);
+
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Add);
+        test(sample.getValue()->price == 20.0f);
+
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::PartialUpdate);
+        test(sample.getValue()->price == 25.0f);   // resolved against the re-added value
+        test(sample.getValue()->lastBid == 21.0f); // carried from the re-added value, not the pre-remove value
+        test(sample.getValue()->lastAsk == 22.0f);
+
+        // Tell the writer the samples were verified.
+        auto done = makeSingleKeyWriter(initRemoveBarrier, "done");
+        done.waitForReaders();
+        done.update(0);
+    }
+
+    // A full value whose custom encoding is empty is still a usable partial-update base: the empty-encoded add is
+    // decoded into a value-bearing sample, so the following partial update resolves against it instead of being
+    // discarded for want of a base.
+    Topic<string, Counter> emptyEncodedTopic(node, "emptyEncodedTopic");
+    emptyEncodedTopic.setReaderDefaultConfig(config);
+    emptyEncodedTopic.setUpdater<int>("increment", [](Counter& counter, int delta) { counter.value += delta; });
+    {
+        auto reader = makeSingleKeyReader(emptyEncodedTopic, "key");
+
+        auto sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Add);
+        test(sample.getValue().value == 0); // the empty encoding decodes to the default value
+
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::PartialUpdate);
+        test(sample.getUpdateTag() == "increment");
+        test(sample.getValue().value == 5); // resolved against the empty-encoded base
+    }
+
+    // Two readers of the same key on one node hold different values for it, because only one of them applies the
+    // priority discard policy. A partial update accepted by both is resolved against each reader's own value.
+    Topic<string, StockPtr> perReaderTopic(node, "perReaderTopic");
+    perReaderTopic.setReaderDefaultConfig(config);
+    perReaderTopic.setUpdater<float>("price", [](StockPtr& stock, float price) { stock->price = price; });
+    {
+        auto noDiscardReader = makeSingleKeyReader(perReaderTopic, "AAPL", "noDiscard");
+
+        ReaderConfig priorityConfig = config;
+        priorityConfig.discardPolicy = DiscardPolicy::Priority;
+        auto priorityReader = makeSingleKeyReader(perReaderTopic, "AAPL", "priority", priorityConfig);
+
+        auto sample = noDiscardReader.getNextUnread();
+        test(sample.getValue()->price == 12.0f); // the high-priority full value
+
+        sample = noDiscardReader.getNextUnread();
+        test(sample.getValue()->price == 100.0f); // the low-priority full value, accepted by this reader
+
+        sample = noDiscardReader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::PartialUpdate);
+        test(sample.getValue()->price == 15.0f);
+        test(sample.getValue()->lastBid == 101.0f); // resolved against the low-priority value
+        test(sample.getValue()->lastAsk == 102.0f);
+
+        // The priority reader discarded the low-priority full value, so it still holds the high-priority one.
+        sample = priorityReader.getNextUnread();
+        test(sample.getValue()->price == 12.0f);
+
+        sample = priorityReader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::PartialUpdate);
+        test(sample.getValue()->price == 15.0f);
+        test(sample.getValue()->lastBid == 13.0f); // resolved against the high-priority value, not the other reader's
+        test(sample.getValue()->lastAsk == 14.0f);
+    }
+
+    // A full value that the Decoder rejects is dropped by every reader of the key on the node: each of them keeps the
+    // value it had and resynchronizes on the next full value that decodes.
+    Topic<string, Counter> decodeErrorTopic(node, "decodeErrorTopic");
+    decodeErrorTopic.setReaderDefaultConfig(config);
+    {
+        auto reader1 = makeSingleKeyReader(decodeErrorTopic, "key", "reader1");
+        auto reader2 = makeSingleKeyReader(decodeErrorTopic, "key", "reader2");
+
+        auto sample = reader1.getNextUnread();
+        test(sample.getValue().value == 1);
+        sample = reader1.getNextUnread();
+        test(sample.getValue().value == 2); // the undecodable value was dropped, not delivered as a default value
+
+        sample = reader2.getNextUnread();
+        test(sample.getValue().value == 1);
+        sample = reader2.getNextUnread();
+        test(sample.getValue().value == 2);
+    }
+
+    // The writer's tag set contains a tag this reader's Decoder rejects. The reader skips that tag and keeps the one
+    // it can decode, so the partial update published with it is still applied.
+    Topic<string, Counter, Op> tagDecodeErrorTopic(node, "tagDecodeErrorTopic");
+    tagDecodeErrorTopic.setReaderDefaultConfig(config);
+    tagDecodeErrorTopic.setUpdater<int>(Op{"increment"}, [](Counter& counter, int delta) { counter.value += delta; });
+    {
+        auto reader = makeSingleKeyReader(tagDecodeErrorTopic, "key");
+
+        auto sample = reader.getNextUnread();
+        test(sample.getValue().value == 1);
+
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::PartialUpdate);
+        test(sample.getUpdateTag() == Op{"increment"});
+        test(sample.getValue().value == 6); // the undecodable tag did not cost the reader this one
     }
 }
 
