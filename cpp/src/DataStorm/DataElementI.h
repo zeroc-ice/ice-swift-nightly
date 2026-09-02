@@ -82,27 +82,6 @@ namespace DataStormI
             {
             }
 
-            /// Determines if any subscriber matches the given sample.
-            ///
-            /// @param sample The sample to evaluate against the subscribers.
-            /// @param matchKey If true, the sample's key is matched against subscriber keys.
-            ///                 If false, the key match is skipped.
-            /// @return `true` if at least one subscriber matches the sample, otherwise false.
-            [[nodiscard]] bool matchOne(const std::shared_ptr<Sample>& sample, bool matchKey) const
-            {
-                for (const auto& [_, subscriber] : subscribers)
-                {
-                    if ((!matchKey || subscriber->keys.empty() ||
-                         subscriber->keys.find(sample->key) != subscriber->keys.end()) &&
-                        (!subscriber->filter || subscriber->filter->match(sample->key)) &&
-                        (!subscriber->sampleFilter || subscriber->sampleFilter->match(sample)))
-                    {
-                        return true;
-                    }
-                }
-                return false;
-            }
-
             [[nodiscard]] std::shared_ptr<Subscriber> addOrGet(
                 std::int64_t topicId,
                 std::int64_t elementId,
@@ -276,7 +255,6 @@ namespace DataStormI
             const std::shared_ptr<Sample>&,
             int,
             const std::shared_ptr<SessionI>&,
-            const std::string&,
             const std::chrono::time_point<std::chrono::system_clock>&,
             bool);
 
@@ -287,6 +265,17 @@ namespace DataStormI
         [[nodiscard]] std::int64_t getId() const { return _id; }
 
         [[nodiscard]] std::shared_ptr<DataStormContract::ElementConfig> getConfig() const;
+
+        /// Determines whether a sample forwarded to the given session facet is addressed to this element.
+        /// The writer forwards a sample once per destination facet, and this element is attached to exactly one of
+        /// them: the facet it configured for its sample filter, or the unfaceted destination when it has no sample
+        /// filter.
+        /// @param facet The facet the sample was forwarded to.
+        /// @return `true` if the sample is addressed to this element, `false` otherwise.
+        [[nodiscard]] bool matchFacet(const std::string& facet) const
+        {
+            return _config->facet ? *_config->facet == facet : facet.empty();
+        }
 
         void waitForListeners(int count) const;
         [[nodiscard]] bool hasListeners() const;
@@ -317,6 +306,15 @@ namespace DataStormI
         // A map containing the element listeners, indexed by the session servant and the target facet. The
         // implementation of forward utilizes the listener map to forward calls to the peer sessions.
         std::map<ListenerKey, Listener> _listeners;
+
+        /// Determines whether any of a listener's subscribers matches the given sample.
+        /// @param listener The listener whose subscribers are evaluated.
+        /// @param sample The sample to evaluate against the subscribers.
+        /// @param matchKey If true, the sample's key is matched against the subscriber keys. If false, the key match
+        /// is skipped.
+        /// @return `true` if at least one subscriber matches the sample, `false` otherwise.
+        [[nodiscard]] bool
+        matchOne(const Listener& listener, const std::shared_ptr<Sample>& sample, bool matchKey) const;
 
     private:
         virtual void forward(const Ice::ByteSeq&, const Ice::Current&) const;
@@ -358,7 +356,6 @@ namespace DataStormI
             const std::shared_ptr<Sample>&,
             int,
             const std::shared_ptr<SessionI>&,
-            const std::string&,
             const std::chrono::time_point<std::chrono::system_clock>&,
             bool) override;
 

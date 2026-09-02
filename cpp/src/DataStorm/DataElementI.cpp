@@ -148,7 +148,8 @@ DataElementI::attach(
     {
         auto q = data.lastIds.find(_id);
         int64_t lastId = q != data.lastIds.end() ? q->second : 0;
-        LongLongDict lastIds = key ? session->getLastIds(topicId, id, shared_from_this()) : LongLongDict{};
+        // Report this element's resume points so the peer replays only what the element has not seen.
+        LongLongDict lastIds = session->getLastIds(topicId, id, shared_from_this());
         DataSamples initializationBatch = getSamples(key, sampleFilter, data.config, lastId, now);
 
         acks.push_back(ElementDataAck{
@@ -600,7 +601,6 @@ DataElementI::queue(
     const shared_ptr<Sample>&,
     int,
     const shared_ptr<SessionI>&,
-    const string&,
     const chrono::time_point<chrono::system_clock>&,
     bool)
 {
@@ -729,13 +729,50 @@ DataElementI::disconnect()
     }
 }
 
+bool
+DataElementI::matchOne(const Listener& listener, const shared_ptr<Sample>& sample, bool matchKey) const
+{
+    // Runs a peer reader's key filter or sample filter predicate, which is application code. We treat a throwing
+    // predicate as not matching: the subscriber is skipped and the scan continues with the listener's remaining
+    // subscribers, the way a predicate that returns false does.
+    auto match = [this, &sample](const shared_ptr<Filter>& filter, const shared_ptr<Filterable>& value)
+    {
+        try
+        {
+            return filter->match(value);
+        }
+        catch (const std::exception& ex)
+        {
+            // Streaming the element would run the application's key formatter inside this very catch, so print the
+            // element id instead. The sample can still reach this listener through another of its subscribers, so
+            // report the skipped subscriber rather than the sample not being sent.
+            Warning out(_traceLevels->logger);
+            out << 'e' << _id << ": skipped a reader for sample " << sample->id << ": the '" << filter->getName()
+                << "' filter failed:\n"
+                << ex.what();
+            return false;
+        }
+    };
+
+    for (const auto& [_, subscriber] : listener.subscribers)
+    {
+        if ((!matchKey || subscriber->keys.empty() || subscriber->keys.find(sample->key) != subscriber->keys.end()) &&
+            (!subscriber->filter || match(subscriber->filter, sample->key)) &&
+            (!subscriber->sampleFilter || match(subscriber->sampleFilter, sample)))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void
 DataElementI::forward(const ByteSeq& inParams, const Current& current) const
 {
     for (const auto& [_, listener] : _listeners)
     {
         // If we are forwarding a sample, check whether at least one of the listeners is interested in it.
-        if (!_sample || listener.matchOne(_sample, false))
+        if (!_sample || matchOne(listener, _sample, false))
         {
             // Forward the call using the listener's session proxy. We don't need to wait for the result.
             listener.proxy
@@ -1048,23 +1085,10 @@ DataReaderI::queue(
     const shared_ptr<Sample>& sample,
     int priority,
     const shared_ptr<SessionI>&,
-    const string& facet,
     const chrono::time_point<chrono::system_clock>& now,
     bool checkKey)
 {
-    // The writer forwards a sample once per destination facet, and this reader is attached to exactly one of them:
-    // the facet it configured for its sample filter, or the unfaceted destination when it has no sample filter.
-    // Accept only the copy addressed to this reader's destination.
-    if (_config->facet ? *_config->facet != facet : !facet.empty())
-    {
-        if (_traceLevels->data > 2)
-        {
-            Trace out(_traceLevels->logger, _traceLevels->dataCat);
-            out << this << ": skipped sample " << sample->id << " (facet doesn't match)";
-        }
-        return;
-    }
-    else if (checkKey)
+    if (checkKey)
     {
         bool matched;
         try
@@ -1753,7 +1777,22 @@ KeyDataWriterI::send(const shared_ptr<Key>& key, const shared_ptr<Sample>& sampl
     assert(key || _keys.size() == 1);
     _sample = sample;
     _sample->key = key ? key : _keys[0];
-    _subscribers->s(_parent->getId(), _keys.empty() ? -_id : _id, toSample(sample, getCommunicator(), _keys.empty()));
+    try
+    {
+        _subscribers->s(
+            _parent->getId(),
+            _keys.empty() ? -_id : _id,
+            toSample(sample, getCommunicator(), _keys.empty()));
+    }
+    catch (...)
+    {
+        // The forwarding runs collocated, so a failure in forward() resurfaces here. Clear the sample being
+        // forwarded on the way out: this element forwards again while it is torn down, and a stale _sample would be
+        // matched against the listeners then. With a filter predicate as the original cause, that second match
+        // throws again while the first exception unwinds, which terminates the process.
+        _sample = nullptr;
+        throw;
+    }
     _sample = nullptr;
 }
 
@@ -1765,7 +1804,7 @@ KeyDataWriterI::forward(const ByteSeq& inParams, const Current& current) const
         // Forward the sample if the listener has at least one subscriber interested in the update. The key is
         // always matched: a multi-key writer's sessions don't necessarily subscribe to every key of the writer,
         // and an unmatched key's sample would be wasted bandwidth at best (the receiver never subscribed its id).
-        if (!_sample || listener.matchOne(_sample, true))
+        if (!_sample || matchOne(listener, _sample, true))
         {
             // Forward the call using the listener's session proxy. We don't need to wait for the result.
             listener.proxy

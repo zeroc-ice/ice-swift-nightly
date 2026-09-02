@@ -3,6 +3,7 @@
 #include "DataStorm/DataStorm.h"
 #include "TestHelper.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 
@@ -129,6 +130,31 @@ void ::Writer::run(int argc, char* argv[])
     }
     cout << "ok" << endl;
 
+    cout << "testing reconnect with an any-key reader without duplicate samples... " << flush;
+    {
+        Topic<string, int> topic(node, "anyKeyReaderReconnect");
+        Topic<string, int> barrier(node, "anyKeyReaderReconnectBarrier");
+        auto writer = makeAnyKeyWriter(topic, "", config);
+        writer.waitForReaders();
+        for (int i = 0; i < 100; ++i)
+        {
+            writer.update("k", i);
+        }
+
+        // Wait for the reader to signal it read the batch and closed the connection.
+        auto readerB = makeSingleKeyReader(barrier, "reader_barrier");
+        auto sample = readerB.getNextUnread();
+
+        // The session has been reestablished; send a second batch. The reader must continue from 100, not
+        // re-receive the retained 0..99.
+        for (int i = 0; i < 100; ++i)
+        {
+            writer.update("k", i + 100);
+        }
+        sample = readerB.getNextUnread();
+    }
+    cout << "ok" << endl;
+
     cout << "testing partial update after reconnect... " << flush;
     {
         Topic<string, string> topic(node, "partialUpdateReconnect");
@@ -183,6 +209,71 @@ void ::Writer::run(int argc, char* argv[])
         writer.update("done");
 
         // Keep the writer alive until the reader verifies both post-reconnect samples.
+        [[maybe_unused]] auto done = makeSingleKeyReader(barrier, "done").getNextUnread();
+        writer.waitForNoReaders();
+    }
+    cout << "ok" << endl;
+
+    cout << "testing resume after a sample addressed to another reader's facet... " << flush;
+    {
+        Topic<string, int> topic(node, "facetResumePoint");
+        Topic<string, int> barrier(node, "facetResumePointBarrier");
+
+        // Sample filters are evaluated here, on the writer. This one answers from a flag the test flips, so the same
+        // sample is rejected when it is published and accepted when the reader reattaches and the writer replays what
+        // the reader has not seen.
+        auto accept = make_shared<atomic<bool>>(false);
+        topic.setSampleFilter<int>(
+            "armed",
+            [accept](int) { return [accept](const Sample<string, int>&) { return accept->load(); }; });
+
+        WriterConfig retained = config;
+        retained.sampleCount = -1; // Retain the rejected sample so the reattach can replay it.
+        auto writer = makeSingleKeyWriter(topic, "key", "", retained);
+
+        auto gate = make_shared<ReconnectGate>();
+        writer.onConnectedReaders(
+            [](const vector<string>&) {},
+            [gate](CallbackReason reason, const string&)
+            {
+                lock_guard lock{gate->mutex};
+                if (reason == CallbackReason::Disconnect)
+                {
+                    gate->disconnected = true;
+                }
+                else if (gate->disconnected)
+                {
+                    gate->reconnected = true;
+                    gate->condition.notify_all();
+                }
+            });
+
+        // The unfiltered reader and the sample-filtered one, each addressed under its own destination facet.
+        writer.waitForReaders(2);
+
+        // The filter rejects this sample, so it is forwarded only to the unfiltered reader's destination.
+        writer.update(1);
+
+        // The unfiltered reader has it. Accept from now on, and tell the reader it may drop the session.
+        [[maybe_unused]] auto ready = makeSingleKeyReader(barrier, "ready").getNextUnread();
+        accept->store(true);
+        auto armed = makeSingleKeyWriter(barrier, "armed");
+        armed.waitForReaders();
+        armed.update(0);
+
+        {
+            // Bounded so a failure asserts rather than blocks; see the wait in the partial update test above.
+            unique_lock lock{gate->mutex};
+            test(gate->condition.wait_for(lock, chrono::seconds(90), [&gate] { return gate->reconnected; }));
+        }
+
+        // The latch records that a reader reconnected, not that one is attached now, so keep the level check too.
+        writer.waitForReaders(2);
+
+        // A second sample, which the filter now accepts as well. The filtered reader must see the replayed first
+        // sample before it.
+        writer.update(2);
+
         [[maybe_unused]] auto done = makeSingleKeyReader(barrier, "done").getNextUnread();
         writer.waitForNoReaders();
     }
