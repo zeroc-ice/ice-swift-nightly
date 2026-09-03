@@ -127,8 +127,7 @@ void ::Reader::run(int argc, char* argv[])
     {
         Topic<string, int> topic(node, "anyKeyReconnect");
         Topic<string, int> barrier(node, "anyKeyReconnectBarrier");
-        // A plain single-key reader against the any-key (filtered) writer: reconnect resumption is driven by the
-        // writer being filtered, so a reader of any kind connected to it must resume rather than re-read history.
+        // A plain single-key reader against the any-key (filtered) writer; the any-key reader case is below.
         auto reader = makeSingleKeyReader(topic, "k", "", config);
         auto writerB = makeSingleKeyWriter(barrier, "reader_barrier");
 
@@ -170,6 +169,71 @@ void ::Reader::run(int argc, char* argv[])
     }
 
     {
+        Topic<string, int> topic(node, "anyKeyReaderReconnect");
+        Topic<string, int> barrier(node, "anyKeyReaderReconnectBarrier");
+        // An any-key reader against the any-key writer. Both elements are filtered elements, so the topic has no key
+        // to pair them with, and the reader has to report its resume points from its filter subscriptions instead.
+        // A sample-filtered any-key reader sits alongside it, so the writer addresses the two under different
+        // facets and each has to resume from its own point.
+        auto reader = makeAnyKeyReader(topic, "", config);
+        auto filtered =
+            makeAnyKeyReader(topic, Filter<SampleEventSeq>("_event", SampleEventSeq{SampleEvent::Update}), "", config);
+        auto writerB = makeSingleKeyWriter(barrier, "reader_barrier");
+
+        string session;
+        for (int i = 0; i < 100; ++i)
+        {
+            auto sample = reader.getNextUnread();
+            if (sample.getValue() != i)
+            {
+                cerr << "unexpected sample: " << sample.getValue() << " expected:" << i << endl;
+                test(false);
+            }
+            session = sample.getSession();
+
+            auto filteredSample = filtered.getNextUnread();
+            if (filteredSample.getValue() != i)
+            {
+                cerr << "unexpected sample on the filtered reader: " << filteredSample.getValue() << " expected:" << i
+                     << endl;
+                test(false);
+            }
+        }
+
+        // Force a session reconnect while the writer retains its history.
+        auto connection = node.getSessionConnection(session);
+        test(connection);
+        connection->close().get();
+
+        // Tell the writer the connection closed (processed after reconnect); it then sends the second batch.
+        writerB.waitForReaders();
+        writerB.update(0);
+
+        // After the reconnect the reader must continue from 100: the writer resumes from the reader's last received
+        // sample rather than re-sending its whole retained queue (which would re-deliver 0..99).
+        for (int i = 0; i < 100; ++i)
+        {
+            auto sample = reader.getNextUnread();
+            if (sample.getValue() != i + 100)
+            {
+                cerr << "duplicate or rewound sample: " << sample.getValue() << " expected:" << (i + 100) << endl;
+                test(false);
+            }
+
+            auto filteredSample = filtered.getNextUnread();
+            if (filteredSample.getValue() != i + 100)
+            {
+                cerr << "duplicate or rewound sample on the filtered reader: " << filteredSample.getValue()
+                     << " expected:" << (i + 100) << endl;
+                test(false);
+            }
+        }
+
+        writerB.waitForReaders();
+        writerB.update(0);
+    }
+
+    {
         Topic<string, string> topic(node, "partialUpdateReconnect");
         Topic<string, int> barrier(node, "partialUpdateReconnectBarrier");
         topic.setUpdater<string>("append", [](string& value, const string& suffix) { value += suffix; });
@@ -202,6 +266,54 @@ void ::Reader::run(int argc, char* argv[])
         auto done = makeSingleKeyWriter(barrier, "done");
         done.waitForReaders();
         done.update(0);
+    }
+
+    {
+        Topic<string, int> topic(node, "facetResumePoint");
+        Topic<string, int> barrier(node, "facetResumePointBarrier");
+
+        // An unfiltered reader and a sample-filtered one on the same writer and key. The writer addresses the
+        // sample-filtered reader under a facet of its own, so a sample only one of them matches is forwarded once,
+        // to that reader's destination.
+        auto reader = makeSingleKeyReader(topic, "key", "", config);
+        auto filtered = makeSingleKeyReader(topic, "key", Filter<int>("armed", 0), "", config);
+
+        // Published while the writer's filter rejects it, so only the unfiltered reader receives it.
+        auto sample = reader.getNextUnread();
+        test(sample.getValue() == 1);
+
+        // Have the writer accept from now on, and wait for it to confirm before dropping the session, so the replay
+        // is evaluated with the filter accepting.
+        auto ready = makeSingleKeyWriter(barrier, "ready");
+        ready.waitForReaders();
+        ready.update(0);
+        [[maybe_unused]] auto armed = makeSingleKeyReader(barrier, "armed").getNextUnread();
+
+        auto connection = node.getSessionConnection(sample.getSession());
+        test(connection);
+        connection->close().get();
+
+        // The reattach replays what each reader has not seen. The filtered reader never received the first sample,
+        // so it must arrive now, ahead of the one the writer publishes after the reconnect.
+        sample = filtered.getNextUnread();
+        if (sample.getValue() != 1)
+        {
+            cerr << "filtered reader resumed past a sample it never received: " << sample.getValue() << " expected:1"
+                 << endl;
+            test(false);
+        }
+
+        sample = filtered.getNextUnread();
+        test(sample.getValue() == 2);
+
+        // The unfiltered reader received the first sample before the reconnect, so the reattach must not replay it:
+        // the next sample it reads is the one published after the reconnect. This catches the mirror regression,
+        // where the empty-facet destination stops advancing its resume point.
+        test(reader.getNextUnread().getValue() == 2);
+
+        auto finished = makeSingleKeyWriter(barrier, "done");
+        finished.waitForReaders();
+        finished.update(0);
     }
 }
 

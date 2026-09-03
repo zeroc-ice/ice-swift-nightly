@@ -510,6 +510,72 @@ void ::Reader::run(int argc, char* argv[])
         test(!filtered.hasUnread());
     }
 
+    // Create a sample-filtered reader after the writer queued three samples, one of which makes the
+    // filter predicate throw. The writer treats that sample as not matching, so the reader still
+    // attaches and is initialized with the other two samples. The reader matches any key, so the
+    // key the throwing sample was written for reaches the predicate too.
+    {
+        Topic<string, string> topic(node, "attachSampleFilterThrow");
+        Topic<string, int> barrier(node, "attachSampleFilterThrowBarrier");
+        Topic<string, int> done(node, "attachSampleFilterThrowDone");
+
+        // Wait until the writer queued all three samples.
+        [[maybe_unused]] auto _ = makeSingleKeyReader(barrier, "barrier").getNextUnread();
+
+        auto reader = makeAnyKeyReader(topic, Filter<string>("throwOnValue", "boom"), "", config);
+        reader.waitForUnread(2);
+        auto samples = reader.getAllUnread();
+        test(samples.size() == 2);
+        test(samples[0].getKey() == "elem");
+        test(samples[0].getEvent() == SampleEvent::Add);
+        test(samples[0].getValue() == "value1");
+        test(samples[1].getKey() == "elem");
+        test(samples[1].getEvent() == SampleEvent::Update);
+        test(samples[1].getValue() == "value3");
+
+        // Signal the writer that the reader was initialized, so it can tear down.
+        auto doneWriter = makeSingleKeyWriter(done, "done");
+        doneWriter.waitForReaders();
+        doneWriter.update(0);
+    }
+
+    // An unfiltered reader and a sample-filtered one on the same writer and key. The writer runs the sample filter
+    // while it selects the live destinations, and the predicate throws for one update and for the remove. Those
+    // samples are skipped for the filtered reader only; the unfiltered reader receives all of them.
+    {
+        Topic<string, string> topic(node, "liveSampleFilterThrow");
+        Topic<string, int> done(node, "liveSampleFilterThrowDone");
+
+        auto reader = makeSingleKeyReader(topic, "elem", "", config);
+        auto filtered = makeSingleKeyReader(topic, "elem", Filter<string>("throwOnValue", "boom"), "", config);
+
+        auto sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Add);
+        test(sample.getValue() == "value1");
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Update);
+        test(sample.getValue() == "boom");
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Update);
+        test(sample.getValue() == "value2");
+        sample = reader.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Remove);
+
+        // The filtered reader skips the two samples whose predicate threw, and nothing else: had "boom" been
+        // delivered, it would be this sample instead of "value2".
+        sample = filtered.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Add);
+        test(sample.getValue() == "value1");
+        sample = filtered.getNextUnread();
+        test(sample.getEvent() == SampleEvent::Update);
+        test(sample.getValue() == "value2");
+        test(!filtered.hasUnread());
+
+        auto doneWriter = makeSingleKeyWriter(done, "done");
+        doneWriter.waitForReaders();
+        doneWriter.update(0);
+    }
+
     // Coexisting any-key and filtered readers on the same topic: each keeps its own subscription. Both receive a
     // sample matching the filter, and destroying the filtered reader leaves the any-key reader subscribed.
     {
