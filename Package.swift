@@ -67,23 +67,23 @@ let package = Package(
         ),
         .binaryTarget(
             name: "IceCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/Ice-3.9.0-nightly.20261012.1.xcframework.zip",
-            checksum: "a7f5cfa5b3a6e630a8fd2431ab593cf494d2d501fa30699a53be3035dce51f9f"
+            url: "https://download.zeroc.com/ice/nightly/3.9/Ice-3.9.0-nightly.20261013.1.xcframework.zip",
+            checksum: "1c298708e66de6c98733104f6e3b391b2b121938293bda342e2c029dedc2d261"
         ),
         .binaryTarget(
             name: "IceDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/IceDiscovery-3.9.0-nightly.20261012.1.xcframework.zip",
-            checksum: "3f9585430f782465d4a6d20055325969498a13ef5418490311f755fd963c841e"
+            url: "https://download.zeroc.com/ice/nightly/3.9/IceDiscovery-3.9.0-nightly.20261013.1.xcframework.zip",
+            checksum: "6788db189b0e7bb3a78cce617bcc5be443c9b707b52181e7a95db19d3d36a911"
         ),
         .binaryTarget(
             name: "IceLocatorDiscoveryCpp",
-            url: "https://download.zeroc.com/ice/nightly/3.9/IceLocatorDiscovery-3.9.0-nightly.20261012.1.xcframework.zip",
-            checksum: "bd4ed069fac65bd86edc2552cd5146ae6e1f941173c04eba162a96c1f2ff2eaa"
+            url: "https://download.zeroc.com/ice/nightly/3.9/IceLocatorDiscovery-3.9.0-nightly.20261013.1.xcframework.zip",
+            checksum: "91dd3b4fbdebc6f9529699ad4d3980a8cbd349cc27dad190999c8e516463d099"
         ),
         .binaryTarget(
             name: "slice2swift",
-            url: "https://download.zeroc.com/ice/nightly/3.9/slice2swift-3.9.0-nightly.20261012.1.artifactbundle.zip",
-            checksum: "5b44df25874aadac3f969505b1a7b06a120e8d859419c1ab82853bdcb35dca0e"
+            url: "https://download.zeroc.com/ice/nightly/3.9/slice2swift-3.9.0-nightly.20261013.1.artifactbundle.zip",
+            checksum: "9c3a6855cae7b06f3661fb768bf5b728ef696992ff5a392665fcd5b4de65d69f"
         ),
         .plugin(
             name: "CompileSlice",
