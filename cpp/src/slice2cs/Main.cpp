@@ -44,7 +44,7 @@ usage(const string& n)
                   "-UNAME                   Remove any definition for NAME.\n"
                   "-IDIR                    Put DIR in the include file search path.\n"
                   "--output-dir DIR         Create files in the directory DIR.\n"
-                  "--icerpc VERSION         Generate code for use with IceRPC C# VERSION (0.6 or 0.7) instead of Ice.\n"
+                  "--icerpc VERSION         Generate code for IceRPC C# VERSION (0.6, 0.7 or 0.8) instead of Ice.\n"
                   "-d, --debug              Print debug messages.\n"
                   "--depend                 Generate Makefile dependencies.\n"
                   "--depend-xml             Generate dependencies in XML format.\n"
@@ -132,14 +132,21 @@ compile(const vector<string>& argv)
 
     bool debug = opts.isSet("debug");
 
-    Slice::GenMode genMode = opts.isSet("icerpc") ? Slice::GenMode::IceRpc : Slice::GenMode::Ice;
-    if (genMode == Slice::GenMode::IceRpc)
+    Slice::GenMode genMode = Slice::GenMode::Ice;
+    if (opts.isSet("icerpc"))
     {
-        // The generated code is currently the same for all supported IceRPC versions.
-        string iceRpcVersion = opts.optArg("icerpc");
-        if (iceRpcVersion != "0.6" && iceRpcVersion != "0.7")
+        string version = opts.optArg("icerpc");
+        if (version == "0.6" || version == "0.7")
         {
-            consoleErr << argv[0] << ": error: unsupported IceRPC version '" << iceRpcVersion << "'" << endl;
+            genMode = Slice::GenMode::IceRpc06;
+        }
+        else if (version == "0.8")
+        {
+            genMode = Slice::GenMode::IceRpc08;
+        }
+        else
+        {
+            consoleErr << argv[0] << ": error: unsupported IceRPC version '" << version << "'" << endl;
             if (!validate)
             {
                 usage(argv[0]);
@@ -194,7 +201,7 @@ compile(const vector<string>& argv)
             }
 
             UnitOptions unitOptions{};
-            if (genMode == Slice::GenMode::IceRpc)
+            if (genMode != Slice::GenMode::Ice)
             {
                 unitOptions.defaultMappedName = [](const Contained& contained)
                 {
@@ -221,8 +228,8 @@ compile(const vector<string>& argv)
                 dependencyGenerator.addDependenciesFor(unit);
                 if (depend)
                 {
-                    string target = removeExtension(baseName(fileName)) +
-                                    (genMode == Slice::GenMode::IceRpc ? ".IceRpc.cs" : ".cs");
+                    string target =
+                        removeExtension(baseName(fileName)) + (genMode == Slice::GenMode::Ice ? ".cs" : ".IceRpc.cs");
                     dependencyGenerator.addMakefileRule(unit->topLevelFile(), target);
                 }
                 // The dependencies are written below, after all units have been processed.
