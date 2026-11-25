@@ -1254,6 +1254,11 @@ Ice::ConnectionI::asyncRequestCanceled(const OutgoingAsyncBasePtr& outAsync, con
                     outAsync->invokeExceptionAsync();
                 }
             }
+
+            if(_asyncRequests.empty())
+            {
+                notifyAll(); // Notify threads blocked in close(GracefullyWithWait)
+            }
             return;
         }
     }
@@ -1277,6 +1282,11 @@ Ice::ConnectionI::asyncRequestCanceled(const OutgoingAsyncBasePtr& outAsync, con
                         outAsync->invokeExceptionAsync();
                     }
                 }
+
+                if(_asyncRequests.empty())
+                {
+                    notifyAll(); // Notify threads blocked in close(GracefullyWithWait)
+                }
                 return;
             }
         }
@@ -1297,6 +1307,11 @@ Ice::ConnectionI::asyncRequestCanceled(const OutgoingAsyncBasePtr& outAsync, con
                     {
                         outAsync->invokeExceptionAsync();
                     }
+                }
+
+                if(_asyncRequests.empty())
+                {
+                    notifyAll(); // Notify threads blocked in close(GracefullyWithWait)
                 }
                 return;
             }
@@ -3244,6 +3259,11 @@ Ice::ConnectionI::doUncompress(InputStream& compressed, InputStream& uncompresse
     if(bzError != BZ_OK)
     {
         throw CompressionException(__FILE__, __LINE__, "BZ2_bzBuffToBuffCompress failed" + getBZ2Error(bzError));
+    }
+
+    if(uncompressedLen != static_cast<unsigned int>(uncompressedSize - headerSize))
+    {
+        throw ProtocolException(__FILE__, __LINE__, "decompressed message size does not match expected size");
     }
 
     copy(compressed.b.begin(), compressed.b.begin() + headerSize, uncompressed.b.begin());
